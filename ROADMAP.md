@@ -8,7 +8,7 @@ nothing in M0 depends on them.
 ## Milestones
 
 | Id | Scope | Status |
-|---|---|---|
+| --- | --- | --- |
 | M0 | Repo scaffold (workspace, lints, xtask, AGENTS) + `texparse` (.tex lexer, structure scan, .bib parser) + `texcraft-cli parse/bib/check` | in progress |
 | M1 | Engine decision landed; `texpkg` curated package set; minimal compile pipeline (`document.compile`) | not started |
 | M2 | `engine` command registry + Session; CLI `--cmd` surface | not started |

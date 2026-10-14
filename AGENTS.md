@@ -53,7 +53,7 @@ LaTeX input is famously adversarial. **This outranks feature work.**
 ## Architecture (mirrors MatCraft's layering; see README.md crate sketch)
 
 | Layer | Crate | Job |
-|---|---|---|
+| --- | --- | --- |
 | L0 | `texparse` | .tex lexer/structure scan, .bib parser, SyncTeX data |
 | L1 | `typeset` | boxes/glue, Knuth–Plass line breaking, math layout |
 | L2 | `texpdf`, `texbib` | PDF writer; BibTeX/CSL-JSON/RIS import & render |
@@ -71,9 +71,11 @@ LaTeX input is famously adversarial. **This outranks feature work.**
 - **Rust only** (no handwritten JS/TS). **Never break wasm.**
 
 ## Quality gates
+
 Before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests,
 layers). One task id per commit (`M0.1: .tex lexer`).
 
 ## Roadmap
+
 `ROADMAP.md` is the one-page summary (stage, progress log). Detail lives in
 `README.md` (product description, open questions) and `docs/` as it lands.
