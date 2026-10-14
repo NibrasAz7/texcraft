@@ -11,10 +11,12 @@ Shared rules and learnings: `../../craftrules` (`storytold/craftrules`).
 The product description and open decisions live in [`README.md`](README.md).
 
 ## Start every session here
+
 1. Read `ROADMAP.md` (stage, next task) and `plan/STATUS.md` if it exists.
 2. Read `README.md` for scope and the open engine/bibliography decisions.
 
 ## Clean room
+
 - Behaviour and semantics come from **public sources only**: The TeXbook's
   published algorithms (Knuth–Plass line breaking is published; appendix G
   math layout is published), the LaTeX2e/3 public documentation, CTAN
@@ -29,7 +31,9 @@ The product description and open decisions live in [`README.md`](README.md).
 - Name rule: TexCraft is "LaTeX-compatible", never claims to be TeX.
 
 ## Never crash
+
 LaTeX input is famously adversarial. **This outranks feature work.**
+
 - **No panics in non-test code:** no `unwrap()`, `expect()`, `panic!`,
   `unreachable!`, `todo!`, `unimplemented!`; no `unsafe` (`forbid`).
 - **Errors are `Result<T, E>`** through the crate's error type and `?`.
@@ -41,11 +45,13 @@ LaTeX input is famously adversarial. **This outranks feature work.**
   Tests may `unwrap` (`clippy.toml`).
 
 ## Assets
+
 - Every non-code file is original, public domain / CC0, or open source /
   Creative Commons that allows redistribution. Fonts go to
   `storytold/craft-fonts` (`CRAFT_FONTS_DIR`), never this repo.
 
 ## Architecture (mirrors MatCraft's layering; see README.md crate sketch)
+
 | Layer | Crate | Job |
 |---|---|---|
 | L0 | `texparse` | .tex lexer/structure scan, .bib parser, SyncTeX data |
