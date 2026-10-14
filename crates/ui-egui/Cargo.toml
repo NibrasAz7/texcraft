@@ -1,0 +1,21 @@
+[package]
+name = "texcraft-ui-egui"
+description = "TexCraft Studio user interface (egui): editor, live structure outline, issues panel."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "texcraft_ui_egui"
+path = "src/lib.rs"
+
+[dependencies]
+texparse = { path = "../texparse" }
+egui = "0.36"
+eframe = "0.36"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rfd = "0.17"

@@ -1,0 +1,18 @@
+[package]
+name = "texcraft"
+description = "TexCraft Studio: LaTeX editor with live structure outline (egui)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "texcraft"
+path = "src/main.rs"
+
+[dependencies]
+texcraft-ui-egui = { path = "../../crates/ui-egui" }
+egui = "0.36"
+eframe = "0.36"
