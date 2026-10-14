@@ -95,7 +95,7 @@ pub fn parse_structure(src: &str) -> DocStructure {
             _ if verbatim.is_some() => {
                 if let Tok::Cmd(c) = &tok.kind {
                     if c == "end" {
-                        if let Some((name, ni)) = group_text(&toks, i) {
+                        if let Some((name, ni)) = group_text(&toks, i, c, &mut d.issues) {
                             if Some(&name) == verbatim.as_ref() {
                                 let begin = env_stack.pop().map(|(_, p)| p).unwrap_or(tok.pos);
                                 d.envs.push(Env { name, begin, end: tok.pos });
@@ -125,7 +125,7 @@ pub fn parse_structure(src: &str) -> DocStructure {
                 let cmd_pos = tok.pos;
                 match name.as_str() {
                     "begin" => {
-                        if let Some((env_name, ni)) = group_text(&toks, i) {
+                        if let Some((env_name, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             if env_stack.len() >= caps::MAX_DEPTH && !depth_warned {
                                 depth_warned = true;
@@ -139,7 +139,7 @@ pub fn parse_structure(src: &str) -> DocStructure {
                         }
                     }
                     "end" => {
-                        if let Some((env_name, ni)) = group_text(&toks, i) {
+                        if let Some((env_name, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             match env_stack.pop() {
                                 Some((open_name, open_pos)) if open_name == env_name => {
@@ -171,7 +171,7 @@ pub fn parse_structure(src: &str) -> DocStructure {
                         let (opts, ni) = opt_arg(&toks, i);
                         i = ni;
                         d.class_options = opts;
-                        if let Some((name, ni)) = group_text(&toks, i) {
+                        if let Some((name, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             d.class = Some((name, cmd_pos));
                         }
@@ -179,7 +179,7 @@ pub fn parse_structure(src: &str) -> DocStructure {
                     "usepackage" | "RequirePackage" => {
                         let (_opts, ni) = opt_arg(&toks, i);
                         i = ni;
-                        if let Some((names, ni)) = group_text(&toks, i) {
+                        if let Some((names, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             for n in names.split(',') {
                                 let n = n.trim();
@@ -190,7 +190,7 @@ pub fn parse_structure(src: &str) -> DocStructure {
                         }
                     }
                     "title" | "author" | "date" => {
-                        if let Some((text, ni)) = group_text(&toks, i) {
+                        if let Some((text, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             let slot = match name.as_str() {
                                 "title" => &mut d.title,
@@ -201,13 +201,13 @@ pub fn parse_structure(src: &str) -> DocStructure {
                         }
                     }
                     "label" => {
-                        if let Some((key, ni)) = group_text(&toks, i) {
+                        if let Some((key, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             d.labels.push((key, cmd_pos));
                         }
                     }
                     "input" | "include" => {
-                        if let Some((f, ni)) = group_text(&toks, i) {
+                        if let Some((f, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             d.inputs.push((f, cmd_pos));
                         }
@@ -215,13 +215,13 @@ pub fn parse_structure(src: &str) -> DocStructure {
                     "includegraphics" => {
                         let (_o, ni) = opt_arg(&toks, i);
                         i = ni;
-                        if let Some((f, ni)) = group_text(&toks, i) {
+                        if let Some((f, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             d.graphics.push((f, cmd_pos));
                         }
                     }
                     "bibliography" | "addbibresource" => {
-                        if let Some((files, ni)) = group_text(&toks, i) {
+                        if let Some((files, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             for f in files.split(',') {
                                 let f = f.trim();
@@ -232,13 +232,13 @@ pub fn parse_structure(src: &str) -> DocStructure {
                         }
                     }
                     "bibliographystyle" => {
-                        if let Some((s, ni)) = group_text(&toks, i) {
+                        if let Some((s, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             d.bibstyles.push((s, cmd_pos));
                         }
                     }
                     "newcommand" | "renewcommand" | "providecommand" | "DeclareMathOperator" | "DeclareRobustCommand" => {
-                        if let Some((n, ni)) = group_text(&toks, i) {
+                        if let Some((n, ni)) = group_text(&toks, i, name, &mut d.issues) {
                             i = ni;
                             d.commands.push((n.trim_start_matches('\\').to_string(), cmd_pos));
                         }
@@ -256,7 +256,7 @@ pub fn parse_structure(src: &str) -> DocStructure {
                             let lvl = *lvl;
                             let (_short, ni) = opt_arg(&toks, i);
                             i = ni;
-                            let title = group_text(&toks, i).map(|(t, ni)| {
+                            let title = group_text(&toks, i, name, &mut d.issues).map(|(t, ni)| {
                                 i = ni;
                                 t
                             });
@@ -264,7 +264,7 @@ pub fn parse_structure(src: &str) -> DocStructure {
                         } else if CITES.contains(&c) {
                             let (_o, ni) = opt_arg(&toks, i);
                             i = ni;
-                            if let Some((keys, ni)) = group_text(&toks, i) {
+                            if let Some((keys, ni)) = group_text(&toks, i, name, &mut d.issues) {
                                 i = ni;
                                 for k in keys.split(',') {
                                     let k = k.trim();
@@ -274,7 +274,7 @@ pub fn parse_structure(src: &str) -> DocStructure {
                                 }
                             }
                         } else if REFS.contains(&c) {
-                            if let Some((key, ni)) = group_text(&toks, i) {
+                            if let Some((key, ni)) = group_text(&toks, i, name, &mut d.issues) {
                                 i = ni;
                                 d.ref_keys.push((key, cmd_pos));
                             }
@@ -349,8 +349,9 @@ fn opt_arg(toks: &[Token], i: usize) -> (String, usize) {
 /// `{balanced}` — consume a mandatory brace group and return its surface
 /// text plus the index after the closing brace. When the next non-space
 /// token isn't `{`, a single token is the argument (TeX's single-token
-/// argument rule, e.g. `\section x`).
-fn group_text(toks: &[Token], i: usize) -> Option<(String, usize)> {
+/// argument rule, e.g. `\section x`). A group that never closes pushes an
+/// issue (credited to `\cmd`) and returns what was captured.
+fn group_text(toks: &[Token], i: usize, cmd: &str, issues: &mut Vec<Issue>) -> Option<(String, usize)> {
     let j = skip_ws(toks, i);
     let first = toks.get(j)?;
     if !matches!(first.kind, Tok::LBrace) {
@@ -391,8 +392,10 @@ fn group_text(toks: &[Token], i: usize) -> Option<(String, usize)> {
             break;
         }
     }
-    // Unclosed group: return what we had anyway; the brace-depth checker
-    // reports the issue.
+    // Unclosed group: return what we captured plus an issue — the main
+    // loop's own depth counter never saw these tokens.
+    let pos = toks.get(j).map(|t| t.pos).unwrap_or(Pos { offset: 0, line: 1, col: 1 });
+    issues.push(Issue { message: format!("unclosed {{ argument to \\{cmd}"), pos });
     Some((text, k))
 }
 
@@ -498,6 +501,12 @@ trailing \section{ignored}
     fn newcommand_and_def() {
         let d = parse_structure(r"\newcommand{\R}{\mathbb{R}} \def\T{\top}");
         assert_eq!(d.commands.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(), vec!["R", "T"]);
+    }
+
+    #[test]
+    fn unclosed_argument_is_reported() {
+        let d = parse_structure("\\section{Intro\nmore text");
+        assert!(d.issues.iter().any(|i| i.message.contains("unclosed { argument to \\section")));
     }
 
     #[test]
