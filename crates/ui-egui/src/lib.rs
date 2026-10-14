@@ -214,6 +214,28 @@ fn compile_and_render(path: &Path) -> CompileJob {
 
 const LEVEL_NAMES: [&str; 7] = ["part", "chapter", "section", "subsection", "subsubsection", "paragraph", "subparagraph"];
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    /// End-to-end: compile examples/minimal.tex via system TeX and
+    /// rasterize the PDF. Skips silently when no TeX engine is installed.
+    #[test]
+    fn compile_and_render_minimal() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/minimal.tex");
+        match compile_and_render(&path) {
+            Ok((report, pages)) => {
+                assert!(report.errors.is_empty(), "compile errors: {:?}", report.errors);
+                assert!(!pages.is_empty(), "no pages rendered");
+                assert!(pages.iter().all(|p| p.size[0] > 0 && p.size[1] > 0));
+            }
+            Err(e) => {
+                assert!(e.contains("no TeX engine"), "unexpected failure: {e}");
+            }
+        }
+    }
+}
+
 impl eframe::App for TexApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
