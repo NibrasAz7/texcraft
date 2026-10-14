@@ -1,0 +1,17 @@
+[package]
+name = "texcraft-engine"
+description = "TexCraft engine layer: Session, command surface, system-TeX compile pipeline."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "texcraft_engine"
+path = "src/lib.rs"
+
+[dependencies]
+texparse = { path = "../texparse" }
+serde_json = "1"

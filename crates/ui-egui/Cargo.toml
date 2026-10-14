@@ -14,8 +14,10 @@ path = "src/lib.rs"
 
 [dependencies]
 texparse = { path = "../texparse" }
+texcraft-engine = { path = "../engine" }
 egui = "0.36"
 eframe = "0.36"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.17"
+hayro = "0.8"

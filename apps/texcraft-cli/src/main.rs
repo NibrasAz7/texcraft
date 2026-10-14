@@ -1,10 +1,11 @@
 //! texcraft-cli — headless TexCraft.
 //!
-//! M0 surface (grows into `run`/`--cmd`/`mcp` once the engine lands):
-//!   texcraft-cli parse <file.tex>   document structure outline
-//!   texcraft-cli check <file.tex>   structural issues only; exit 1 if any
-//!   texcraft-cli bib <file.bib>     bibliography entries and issues
+//!   texcraft-cli parse <file.tex>     document structure outline
+//!   texcraft-cli check <file.tex>     structural issues only; exit 1 if any
+//!   texcraft-cli bib <file.bib>       bibliography entries and issues
+//!   texcraft-cli compile <file.tex>   system-TeX compile to .texcraft/; exit 1 on errors
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use texparse::{parse_bib, parse_structure};
@@ -15,6 +16,7 @@ fn main() -> ExitCode {
         Some("parse") => with_file(args.get(1), parse_file),
         Some("check") => with_file(args.get(1), check_file),
         Some("bib") => with_file(args.get(1), bib_file),
+        Some("compile") => compile_cmd(args.get(1)),
         _ => {
             usage();
             if args.is_empty() {
@@ -33,7 +35,8 @@ fn usage() {
          usage:\n\
          \x20 texcraft-cli parse <file.tex>   document structure outline\n\
          \x20 texcraft-cli check <file.tex>   structural issues (exit 1 if any)\n\
-         \x20 texcraft-cli bib   <file.bib>   bibliography entries\n"
+         \x20 texcraft-cli bib   <file.bib>   bibliography entries\n\
+         \x20 texcraft-cli compile <file.tex> system-TeX compile (exit 1 on errors)\n"
     );
 }
 
@@ -108,6 +111,42 @@ fn check_file(_path: &str, src: &str) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+fn compile_cmd(arg: Option<&String>) -> ExitCode {
+    let Some(path) = arg else {
+        usage();
+        return ExitCode::FAILURE;
+    };
+    match texcraft_engine::compile_file(Path::new(path), None) {
+        Ok(report) => {
+            for e in &report.errors {
+                match e.line {
+                    Some(l) => println!("error {l}: {}", e.message),
+                    None => println!("error: {}", e.message),
+                }
+            }
+            for w in &report.warnings {
+                match w.line {
+                    Some(l) => println!("warning {l}: {}", w.message),
+                    None => println!("warning: {}", w.message),
+                }
+            }
+            match &report.pdf {
+                Some(p) => println!("{}: wrote {} ({} page(s))", report.engine, p.display(), report.pages.unwrap_or(0)),
+                None => println!("{}: no PDF produced", report.engine),
+            }
+            if report.errors.is_empty() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("texcraft-cli: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 

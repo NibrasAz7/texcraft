@@ -1,0 +1,449 @@
+//! TexCraft engine layer (L5): `Session` + command surface.
+//!
+//! M0 scope: `Session` holds the open document (path, source, dirty flag)
+//! and `execute()` dispatches the first command set — `document.open`,
+//! `document.save`, `document.compile`, `source.set`, `source.get`,
+//! `structure.get`. `document.compile` runs a **system TeX** engine
+//! (xelatex/lualatex/pdflatex probed on PATH) into a `.texcraft/` build
+//! directory next to the document, parses the log, and reports the PDF
+//! path. Shell escape is never enabled. Tectonic embedding replaces this
+//! invocation in M1+; the command id and report shape stay.
+#![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde_json::{json, Value};
+use texparse::{parse_structure, DocStructure};
+
+/// Hidden build directory next to the document (`.aux`/`.log`/`.pdf`).
+const BUILD_DIR: &str = ".texcraft";
+
+/// Packages that require a Unicode TeX engine (XeTeX/LuaTeX).
+const UNICODE_PACKAGES: [&str; 4] = ["fontspec", "unicode-math", "polyglossia", "bidi"];
+
+/// Error type for all engine operations.
+#[derive(Debug)]
+pub enum EngineError {
+    /// Filesystem or process error.
+    Io(std::io::Error),
+    /// No usable TeX engine found on PATH.
+    NoTexEngine,
+    /// Command needs a file path but the session has none.
+    NoFile,
+    /// Unknown command id.
+    UnknownCommand(String),
+    /// A required parameter is missing or of the wrong type.
+    BadParam(&'static str),
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "io: {e}"),
+            Self::NoTexEngine => write!(f, "no TeX engine found on PATH (install MiKTeX or TeX Live)"),
+            Self::NoFile => write!(f, "document has no file path — save it first"),
+            Self::UnknownCommand(c) => write!(f, "unknown command '{c}'"),
+            Self::BadParam(p) => write!(f, "missing or invalid parameter '{p}'"),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}
+
+impl From<std::io::Error> for EngineError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+/// One TeX compile error from the `.log`.
+#[derive(Debug, Clone)]
+pub struct CompileError {
+    /// Source line in the `.tex` file, if the log reported one.
+    pub line: Option<u32>,
+    /// Error message (single line).
+    pub message: String,
+}
+
+/// Result of one `document.compile` run.
+#[derive(Debug)]
+pub struct CompileReport {
+    /// Engine binary used (e.g. "xelatex").
+    pub engine: String,
+    /// Path to the produced PDF, if the engine wrote one.
+    pub pdf: Option<PathBuf>,
+    /// Page count reported in the log.
+    pub pages: Option<u32>,
+    /// Errors (typically fatal, `!` / `file:line:` log entries).
+    pub errors: Vec<CompileError>,
+    /// `LaTeX Warning:` entries.
+    pub warnings: Vec<CompileError>,
+    /// Tail of the build log for diagnostics.
+    pub log_tail: String,
+}
+
+impl CompileReport {
+    fn to_json(&self) -> Value {
+        let errs: Vec<Value> = self.errors.iter().map(|e| json!({"line": e.line, "message": e.message})).collect();
+        let warns: Vec<Value> = self.warnings.iter().map(|w| json!({"line": w.line, "message": w.message})).collect();
+        json!({
+            "engine": self.engine,
+            "pdf": self.pdf.as_ref().map(|p| p.display().to_string()),
+            "pages": self.pages,
+            "errors": errs,
+            "warnings": warns,
+        })
+    }
+}
+
+/// An open TexCraft document session.
+#[derive(Default)]
+pub struct Session {
+    path: Option<PathBuf>,
+    src: String,
+    dirty: bool,
+}
+
+impl Session {
+    /// Empty session (untitled document).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Session prefilled with `src`, not dirty (e.g. an editor template).
+    pub fn with_source(src: String) -> Self {
+        Self { path: None, src, dirty: false }
+    }
+
+    /// Path of the open file, if any.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Current source text.
+    pub fn source(&self) -> &str {
+        &self.src
+    }
+
+    /// Whether the buffer differs from the file on disk.
+    pub fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Replace the buffer contents.
+    pub fn set_source(&mut self, text: String) {
+        self.dirty = self.dirty || text != self.src;
+        self.src = text;
+    }
+
+    /// Load a `.tex` file into the session.
+    pub fn open(&mut self, path: &Path) -> Result<(), EngineError> {
+        let bytes = std::fs::read(path)?;
+        self.src = String::from_utf8_lossy(&bytes).into_owned();
+        self.path = Some(path.to_path_buf());
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Write the buffer back to its file.
+    pub fn save(&mut self) -> Result<(), EngineError> {
+        let Some(path) = self.path.clone() else { return Err(EngineError::NoFile) };
+        std::fs::write(&path, self.src.as_bytes())?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Write the buffer to a new file and make it the session path.
+    pub fn save_as(&mut self, path: &Path) -> Result<(), EngineError> {
+        self.path = Some(path.to_path_buf());
+        self.save()
+    }
+
+    /// Live structural scan of the buffer.
+    pub fn structure(&self) -> DocStructure {
+        parse_structure(&self.src)
+    }
+
+    /// Save-if-dirty, then compile the document with a system TeX engine.
+    pub fn compile(&mut self) -> Result<CompileReport, EngineError> {
+        if self.dirty {
+            self.save()?;
+        }
+        let path = self.path.clone().ok_or(EngineError::NoFile)?;
+        compile_file(&path, Some(&self.src))
+    }
+
+    /// Dispatch a command by id. Params are JSON; results are JSON.
+    pub fn execute(&mut self, cmd: &str, params: &Value) -> Result<Value, EngineError> {
+        match cmd {
+            "document.open" => {
+                let path = params.get("path").and_then(Value::as_str).ok_or(EngineError::BadParam("path"))?;
+                self.open(Path::new(path))?;
+                Ok(json!({"ok": true, "path": self.path_string()}))
+            }
+            "document.save" => {
+                if let Some(path) = params.get("path").and_then(Value::as_str) {
+                    self.save_as(Path::new(path))?;
+                } else {
+                    self.save()?;
+                }
+                Ok(json!({"ok": true, "path": self.path_string()}))
+            }
+            "document.compile" => Ok(self.compile()?.to_json()),
+            "source.set" => {
+                let text = params.get("text").and_then(Value::as_str).ok_or(EngineError::BadParam("text"))?;
+                self.set_source(text.to_string());
+                Ok(json!({"ok": true}))
+            }
+            "source.get" => Ok(json!({"text": self.src})),
+            "structure.get" => Ok(structure_json(&self.structure())),
+            other => Err(EngineError::UnknownCommand(other.to_string())),
+        }
+    }
+
+    fn path_string(&self) -> Value {
+        self.path.as_ref().map_or(Value::Null, |p| Value::String(p.display().to_string()))
+    }
+}
+
+fn structure_json(d: &DocStructure) -> Value {
+    json!({
+        "class": d.class.as_ref().map(|(c, _)| c),
+        "class_options": d.class_options,
+        "packages": d.packages.iter().map(|(p, _)| p).collect::<Vec<_>>(),
+        "title": d.title.as_ref().map(|(t, _)| t),
+        "author": d.author.as_ref().map(|(a, _)| a),
+        "headings": d.headings.iter().map(|h| json!({"line": h.pos.line, "level": h.level, "title": h.title})).collect::<Vec<_>>(),
+        "labels": d.labels.iter().map(|(l, _)| l).collect::<Vec<_>>(),
+        "cite_keys": d.cite_keys.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+        "bibliographies": d.bibliographies.iter().map(|(b, _)| b).collect::<Vec<_>>(),
+        "issues": d.issues.iter().map(|i| json!({"line": i.pos.line, "col": i.pos.col, "message": i.message})).collect::<Vec<_>>(),
+    })
+}
+
+/// Pick a TeX engine binary on PATH. `unicode` restricts to
+/// XeTeX/LuaTeX (required by fontspec/polyglossia/bidi documents).
+fn find_engine(unicode: bool) -> Option<String> {
+    const ANY: [&str; 3] = ["xelatex", "lualatex", "pdflatex"];
+    const UNICODE: [&str; 2] = ["xelatex", "lualatex"];
+    let candidates: &[&str] = if unicode { &UNICODE } else { &ANY };
+    candidates.iter().find(|c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)).map(|c| c.to_string())
+}
+
+/// Compile `path` with a system TeX engine into `<dir>/.texcraft/`.
+/// `src` (the possibly-unsaved buffer) is only used for engine selection;
+/// the file on disk is what gets compiled — save first.
+pub fn compile_file(path: &Path, src: Option<&str>) -> Result<CompileReport, EngineError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().ok_or(EngineError::NoFile)?.to_string_lossy();
+    let stem = path.file_stem().ok_or(EngineError::NoFile)?.to_string_lossy();
+
+    let owned;
+    let src = match src {
+        Some(s) => s,
+        None => {
+            owned = String::from_utf8_lossy(&std::fs::read(path)?).into_owned();
+            &owned
+        }
+    };
+    let doc = parse_structure(src);
+    let unicode = doc.packages.iter().any(|(p, _)| UNICODE_PACKAGES.contains(&p.as_str()));
+    let engine = find_engine(unicode).ok_or(EngineError::NoTexEngine)?;
+
+    let outdir = parent.join(BUILD_DIR);
+    std::fs::create_dir_all(&outdir)?;
+
+    // -output-directory is resolved relative to the process cwd, so pass
+    // the bare name; cwd is set to the document directory below.
+    // Never pass -shell-escape / -enable-write18: shell escape is banned.
+    let run_engine = || -> Result<std::process::Output, EngineError> {
+        Ok(Command::new(&engine)
+            .arg("-interaction=nonstopmode")
+            .arg("-halt-on-error")
+            .arg("-file-line-error")
+            .arg("-synctex=1")
+            .arg(format!("-output-directory={BUILD_DIR}"))
+            .arg(name.as_ref())
+            .current_dir(parent)
+            .output()?)
+    };
+
+    let mut output = run_engine()?;
+
+    // Bibliography pass: `xelatex → bibtex → xelatex → xelatex`.
+    if !doc.bibliographies.is_empty() && output.status.success() {
+        let _ = Command::new("bibtex").arg(Path::new(BUILD_DIR).join(stem.as_ref())).current_dir(parent).output();
+        run_engine()?;
+        output = run_engine()?;
+    }
+
+    let log_path = outdir.join(format!("{stem}.log"));
+    let log = std::fs::read_to_string(&log_path).unwrap_or_else(|_| {
+        // No log file — fall back to the captured process output.
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    });
+    let (errors, warnings, pages) = parse_log(&log);
+
+    let pdf = outdir.join(format!("{stem}.pdf"));
+    let pdf = if pdf.is_file() { Some(pdf) } else { None };
+
+    let mut tail: Vec<&str> = log.lines().rev().take(30).collect();
+    tail.reverse();
+    let log_tail = tail.join("\n");
+
+    Ok(CompileReport { engine, pdf, pages, errors, warnings, log_tail })
+}
+
+/// Parse a TeX log into `(errors, warnings, page_count)`.
+fn parse_log(log: &str) -> (Vec<CompileError>, Vec<CompileError>, Option<u32>) {
+    let lines: Vec<&str> = log.lines().collect();
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let mut pages = None;
+
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(line) = lines.get(i) else { break };
+        i += 1;
+
+        // `! message` fatal error; the `l.<n>` context line gives the
+        // source line number.
+        if let Some(msg) = line.strip_prefix('!') {
+            let mut lineno = None;
+            for ctx in lines.iter().skip(i).take(6) {
+                if let Some(rest) = ctx.trim().strip_prefix("l.") {
+                    lineno = rest.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse::<u32>().ok();
+                    break;
+                }
+                if ctx.is_empty() {
+                    break;
+                }
+            }
+            errors.push(CompileError { line: lineno, message: msg.trim().to_string() });
+            continue;
+        }
+
+        // `-file-line-error` style: `<file>:<line>: <message>`.
+        if let Some((line_no, msg)) = file_line_error(line) {
+            // Skip if a `!` error already covered this line.
+            if errors.iter().any(|e: &CompileError| e.line == Some(line_no)) {
+                continue;
+            }
+            errors.push(CompileError { line: Some(line_no), message: msg });
+            continue;
+        }
+
+        if let Some(msg) = line.strip_prefix("LaTeX Warning:") {
+            warnings.push(CompileError { line: input_line_number(msg), message: msg.trim().to_string() });
+            continue;
+        }
+
+        if line.starts_with("Output written on") {
+            // The `(N pages, …)` part may wrap onto a continuation line
+            // (TeX logs hard-wrap near column 79) — join a few lines.
+            let joined: String = lines.iter().skip(i - 1).take(3).copied().collect::<Vec<_>>().join(" ");
+            pages = joined.rsplit('(').next().and_then(|s| s.split_whitespace().next()).and_then(|n| n.parse::<u32>().ok());
+        }
+    }
+    (errors, warnings, pages)
+}
+
+/// Parse a `-file-line-error` line `path:12: message` → (12, message).
+/// Skips `C:\...` drive prefixes (colon at index 1).
+fn file_line_error(line: &str) -> Option<(u32, String)> {
+    let mut search_from = 0;
+    // Skip a drive-letter colon like `C:`.
+    if line.len() >= 2 && line.as_bytes().get(1) == Some(&b':') && line.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
+        search_from = 2;
+    }
+    let hay = line.get(search_from..)?;
+    // Find `:<digits>:`.
+    let bytes = hay.as_bytes();
+    let mut j = 0;
+    while j < bytes.len() {
+        if bytes[j] == b':' {
+            let digits_start = j + 1;
+            let mut k = digits_start;
+            while k < bytes.len() && bytes[k].is_ascii_digit() {
+                k += 1;
+            }
+            if k > digits_start && k < bytes.len() && bytes[k] == b':' {
+                let line_no: u32 = hay.get(digits_start..k)?.parse().ok()?;
+                let msg = hay.get(k + 1..)?.trim();
+                // A bare path colon (`main.tex:`) without a message is not
+                // an error line.
+                if !msg.is_empty() {
+                    return Some((line_no, msg.to_string()));
+                }
+            }
+        }
+        j += 1;
+    }
+    None
+}
+
+/// `... on input line 12.` → `12`.
+fn input_line_number(msg: &str) -> Option<u32> {
+    let idx = msg.rfind("on input line ")?;
+    msg.get(idx + "on input line ".len()..)?.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_LOG: &str = "This is XeTeX, Version 3.141592653\n\
+         minimal.tex:7: Undefined control sequence\n\
+         l.7 \\badcommand\n\
+         ! LaTeX Error: \\begin{document} ended by \\end{itemize}.\n\
+         l.9 \\end{itemize}\n\
+         LaTeX Warning: Reference `foo' on page 1 undefined on input line 12.\n\
+         Output written on minimal.pdf (3 pages, 12345 bytes).\n";
+
+    #[test]
+    fn log_parses_errors_warnings_pages() {
+        let (errors, warnings, pages) = parse_log(SAMPLE_LOG);
+        assert_eq!(pages, Some(3));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings.first().map(|w| w.line), Some(Some(12)));
+        assert!(errors.iter().any(|e| e.line == Some(7)));
+        assert!(errors.iter().any(|e| e.line == Some(9) && e.message.contains("\\begin{document}")));
+    }
+
+    #[test]
+    fn file_line_error_skips_drive_colon() {
+        assert_eq!(file_line_error("C:/tmp/main.tex:4: Missing $ inserted"), Some((4, "Missing $ inserted".to_string())));
+        assert_eq!(file_line_error("This is XeTeX, Version 3.14"), None);
+    }
+
+    #[test]
+    fn execute_rejects_unknown_and_bad_params() {
+        let mut s = Session::new();
+        assert!(matches!(s.execute("nope", &json!({})), Err(EngineError::UnknownCommand(_))));
+        assert!(matches!(s.execute("document.open", &json!({})), Err(EngineError::BadParam("path"))));
+        assert!(matches!(s.execute("source.set", &json!({"text": 42})), Err(EngineError::BadParam("text"))));
+        assert!(matches!(s.execute("document.save", &json!({})), Err(EngineError::NoFile)));
+    }
+
+    #[test]
+    fn execute_source_and_structure() {
+        let mut s = Session::new();
+        s.execute("source.set", &json!({"text": "\\documentclass{article}\n\\begin{document}\n\\section{Hi}\n\\end{document}\n"})).unwrap();
+        let st = s.execute("structure.get", &json!({})).unwrap();
+        assert_eq!(st["class"], "article");
+        assert_eq!(st["headings"][0]["title"], "Hi");
+        assert!(s.dirty());
+    }
+
+    #[test]
+    fn hostile_params_never_panic() {
+        let mut s = Session::new();
+        for cmd in ["document.open", "document.save", "document.compile", "source.set", "source.get", "structure.get", "garbage"] {
+            for p in [json!(null), json!({"path": 1, "text": null}), json!("x"), json!([1, 2])] {
+                let _ = s.execute(cmd, &p);
+            }
+        }
+    }
+}

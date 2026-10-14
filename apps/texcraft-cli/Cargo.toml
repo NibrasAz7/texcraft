@@ -14,3 +14,4 @@ path = "src/main.rs"
 
 [dependencies]
 texparse = { path = "../../crates/texparse" }
+texcraft-engine = { path = "../../crates/engine" }
