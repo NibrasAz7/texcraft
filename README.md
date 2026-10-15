@@ -10,6 +10,13 @@ Reference target: Overleaf's editor surface (see `docs/reference/` notes;
 screenshots of the public product used only as UX reference, never for
 assets or code).
 
+**Status: alpha.** Working today: the egui studio (editor, structure
+outline, real PDF preview via a system TeX engine — MiKTeX/TeX Live),
+log-driven compile reruns, bibtex/biber passes, SyncTeX command plumbing,
+and a headless CLI. Not yet: embedded typesetter, SyncTeX click-through,
+project tree, multi-file awareness, history, RTL, templates. See
+[`ROADMAP.md`](ROADMAP.md) for the milestone plan.
+
 ## What it is
 
 A user writes LaTeX; TexCraft keeps a real PDF preview one keystroke away.
