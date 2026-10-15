@@ -17,6 +17,8 @@ use std::process::Command;
 use serde_json::{json, Value};
 use texparse::{parse_structure, DocStructure};
 
+pub mod synctex;
+
 /// Hidden build directory next to the document (`.aux`/`.log`/`.pdf`).
 const BUILD_DIR: &str = ".texcraft";
 
@@ -272,11 +274,43 @@ pub fn compile_file(path: &Path, src: Option<&str>) -> Result<CompileReport, Eng
 
     let mut output = run_engine()?;
 
-    // Bibliography pass: `xelatex → bibtex → xelatex → xelatex`.
-    if !doc.bibliographies.is_empty() && output.status.success() {
-        let _ = Command::new("bibtex").arg(Path::new(BUILD_DIR).join(stem.as_ref())).current_dir(parent).output();
-        run_engine()?;
-        output = run_engine()?;
+    // Bibliography + rerun passes, latexmk-style: driven by the artifacts
+    // the first pass produced and by what the log asks for — not by a fixed
+    // sequence or by scanning the source. `.bcf` → biber (biblatex);
+    // `\bibdata` in the .aux → bibtex (classic \bibliography). A log that
+    // asks for a rerun ("Rerun to get cross-references right", label
+    // changes, bib requests) gets one, capped.
+    const MAX_RERUNS: u32 = 4;
+    if output.status.success() {
+        let bcf = outdir.join(format!("{stem}.bcf"));
+        let aux = outdir.join(format!("{stem}.aux"));
+        let needs_bibtex = std::fs::read_to_string(&aux).map(|s| s.contains("\\bibdata")).unwrap_or(false);
+        let bib_tool = if bcf.is_file() {
+            Some("biber")
+        } else if needs_bibtex {
+            Some("bibtex")
+        } else {
+            None
+        };
+        if let Some(tool) = bib_tool {
+            // The aux/bcf live in the out dir; the .bib lives next to the
+            // source — BIBINPUTS/BSTINPUTS bridge the gap.
+            let abs_parent = std::path::absolute(parent)?;
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            let _ = Command::new(tool)
+                .arg(stem.as_ref())
+                .current_dir(&outdir)
+                .env("BIBINPUTS", format!("{}{sep}", abs_parent.display()))
+                .env("BSTINPUTS", format!("{}{sep}", abs_parent.display()))
+                .output();
+            output = run_engine()?;
+        }
+        let log_path = outdir.join(format!("{stem}.log"));
+        let mut passes = 0u32;
+        while output.status.success() && passes < MAX_RERUNS && log_needs_rerun(&log_path) {
+            output = run_engine()?;
+            passes += 1;
+        }
     }
 
     let log_path = outdir.join(format!("{stem}.log"));
@@ -294,6 +328,19 @@ pub fn compile_file(path: &Path, src: Option<&str>) -> Result<CompileReport, Eng
     let log_tail = tail.join("\n");
 
     Ok(CompileReport { engine, pdf, pages, errors, warnings, log_tail })
+}
+
+/// The TeX log asks for another pass — cross-reference rerun requests,
+/// changed labels, bib requests (latexmk-style signals).
+fn log_needs_rerun(log_path: &Path) -> bool {
+    let Ok(log) = std::fs::read_to_string(log_path) else {
+        return false;
+    };
+    log.contains("Rerun to get")
+        || log.contains("Label(s) may have changed")
+        || log.contains("Please rerun LaTeX")
+        || log.contains("Please (re)run Biber")
+        || log.contains("Please (re)run BibTeX")
 }
 
 /// Parse a TeX log into `(errors, warnings, page_count)`.

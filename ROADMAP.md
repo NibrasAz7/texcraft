@@ -35,3 +35,13 @@ widget) are tracked there — nothing in M0 depends on them.
   TeX semantics (def/registers/ifs/csname/input, caret diagnostics; one
   gap: unbounded expansion stack → worker thread required). Plan updated:
   C live, B shipping, A′ = own typesetter on texlang/boxworks.
+- M0.8 — LocalLeaf recon (MIT, github.com/leoaliperti/LocalLeaf — a
+  shipped local-first Overleaf-style editor, `texcraft-core` Rust core +
+  Tauri/Vue/CodeMirror/PDF.js frontend). Technique-level adoptions into
+  `engine`: log-driven rerun loop (cross-refs resolve without a
+  bibliography now), artifact-driven bibliography (`.bcf`→biber,
+  `.aux \bibdata`→bibtex, `BIBINPUTS`/`BSTINPUTS`), and a `synctex`
+  module wrapping the distro `synctex` CLI for source↔PDF jumps
+  (verified on MiKTeX both directions). Their MCP surface
+  (compile/read/write/list-engines) informs M2. Name note: "texcraft"
+  is now taken twice (JF crate + LocalLeaf's `texcraft-core`).
