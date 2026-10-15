@@ -10,3 +10,4 @@ examples/*.fls
 examples/*.log
 examples/*.pdf
 examples/*.synctex.gz
+texcraft-shot.png

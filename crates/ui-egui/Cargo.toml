@@ -21,3 +21,4 @@ eframe = "0.36"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.17"
 hayro = "0.8"
+image = { version = "0.25", default-features = false, features = ["png"] }

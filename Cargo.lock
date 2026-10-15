@@ -3208,6 +3208,7 @@ dependencies = [
  "eframe",
  "egui",
  "hayro",
+ "image",
  "rfd",
  "texcraft-engine",
  "texparse",

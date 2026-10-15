@@ -225,12 +225,25 @@ fn structure_json(d: &DocStructure) -> Value {
     })
 }
 
+/// Every TeX engine binary `compile_file` knows how to drive, in
+/// preference order (Unicode engines first).
+const ENGINE_CANDIDATES: &[&str] = &["xelatex", "lualatex", "pdflatex"];
+
+/// Engine binaries found on PATH — for UI pickers. Order matches
+/// `compile_file`'s preference.
+pub fn detect_engines() -> Vec<String> {
+    ENGINE_CANDIDATES
+        .iter()
+        .filter(|c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false))
+        .map(|c| c.to_string())
+        .collect()
+}
+
 /// Pick a TeX engine binary on PATH. `unicode` restricts to
 /// XeTeX/LuaTeX (required by fontspec/polyglossia/bidi documents).
 fn find_engine(unicode: bool) -> Option<String> {
-    const ANY: [&str; 3] = ["xelatex", "lualatex", "pdflatex"];
     const UNICODE: [&str; 2] = ["xelatex", "lualatex"];
-    let candidates: &[&str] = if unicode { &UNICODE } else { &ANY };
+    let candidates: &[&str] = if unicode { &UNICODE } else { ENGINE_CANDIDATES };
     candidates.iter().find(|c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)).map(|c| c.to_string())
 }
 
@@ -238,6 +251,12 @@ fn find_engine(unicode: bool) -> Option<String> {
 /// `src` (the possibly-unsaved buffer) is only used for engine selection;
 /// the file on disk is what gets compiled — save first.
 pub fn compile_file(path: &Path, src: Option<&str>) -> Result<CompileReport, EngineError> {
+    compile_file_with(path, src, None)
+}
+
+/// `compile_file` with an explicit engine override — `Some("lualatex")`
+/// pins the binary; `None` auto-picks per the document's packages.
+pub fn compile_file_with(path: &Path, src: Option<&str>, engine_override: Option<&str>) -> Result<CompileReport, EngineError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path.file_name().ok_or(EngineError::NoFile)?.to_string_lossy();
     let stem = path.file_stem().ok_or(EngineError::NoFile)?.to_string_lossy();
@@ -252,7 +271,10 @@ pub fn compile_file(path: &Path, src: Option<&str>) -> Result<CompileReport, Eng
     };
     let doc = parse_structure(src);
     let unicode = doc.packages.iter().any(|(p, _)| UNICODE_PACKAGES.contains(&p.as_str()));
-    let engine = find_engine(unicode).ok_or(EngineError::NoTexEngine)?;
+    let engine = match engine_override {
+        Some(e) => e.to_string(),
+        None => find_engine(unicode).ok_or(EngineError::NoTexEngine)?,
+    };
 
     let outdir = parent.join(BUILD_DIR);
     std::fs::create_dir_all(&outdir)?;
