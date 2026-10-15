@@ -1,9 +1,10 @@
 # TexCraft roadmap
 
 **Stage: M0 — scaffold and parsing core.** The crate sketch and product
-description are in `README.md`. Open decisions (engine option B vs A,
-bibliography backend, history backend, editor widget) are tracked there —
-nothing in M0 depends on them.
+description are in `README.md`. Open decisions (engine option B vs A′ —
+A′ now means building on MIT-licensed `texlang`/`boxworks` from
+jamespfennell/texcraft, bibliography backend, history backend, editor
+widget) are tracked there — nothing in M0 depends on them.
 
 ## Milestones
 
@@ -26,3 +27,11 @@ nothing in M0 depends on them.
   on PATH, `.texcraft/` build dir, no shell escape, bibtex pass when a
   bibliography exists), hayro rasterizes pages in the preview pane.
   `texcraft-cli compile` added. Repo published to `NibrasAz7/texcraft`.
+- M0.7 — reconnaissance: observation-level REA/Ghidra survey of an
+  installed TeXstudio (feature/subsystem inventory — BuildManager command
+  constants, LatexDocument/LatexParser IDE model, QSynctex, BibTeXDialog;
+  no implementation copied) and analysis of jamespfennell/texcraft (MIT),
+  validated by a spike that embedded `texlang` via git dep and ran real
+  TeX semantics (def/registers/ifs/csname/input, caret diagnostics; one
+  gap: unbounded expansion stack → worker thread required). Plan updated:
+  C live, B shipping, A′ = own typesetter on texlang/boxworks.

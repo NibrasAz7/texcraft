@@ -162,18 +162,31 @@ The family convention is clean-room-from-scratch, but TeX is special:
 | --- | --- | --- |
 | **A. Own TeX-subset typesetter** | clean-room, consistent with family | Huge: line breaking (Knuth–Plass is published), boxes/glue, math layout (appendix G is published). Years, not months — but we control everything (incremental retypeset, human-readable errors, clean wasm), and never touch GPL. |
 | **B. Vendor the Tectonic core** | MIT — Tectonic already excised XeTeX's GPL/LGPL parts (kpathsea, poppler) and de-web2c'd the engine for Rust | Real Unicode TeX fast, **already Rust-hosted**, already handles Arabic via fontspec/bidi — exactly what arabdoc needs. Still a borrowed engine: no incremental typesetting, cryptic-error surface unchanged. **pdfTeX, LuaTeX, BibTeX, biber stay banned (GPL).** |
-| **C. Wrap system TeX Live / MiKTeX** | zero shipped code | Nothing works out of the box without a 5 GB distro; fine as an *escape hatch* toggle ("use system TeX"), bad as the only path. |
+| **C. Wrap system TeX Live / MiKTeX** | zero shipped code | Nothing works out of the box without a 5 GB distro; fine as an *escape hatch* toggle ("use system TeX"), bad as the only path. **Now working** (M0.6): `document.compile` probes MiKTeX/TeX Live, full bibtex passes, hayro-rasterized preview. |
+| **D. Build on `texlang`/`boxworks` (jamespfennell/texcraft)** | MIT | Existing "LLVM-style" modular TeX reimplementation in Rust: `texlang` (tokenizer, catcodes, real macro expansion, registers, conditionals — benchmarks ~5% slower than pdfTeX), `boxworks`+`-knuthplass`+`-hyphenate` (boxes/glue, line breaking), `tfm`, `dvi`. WASM-proven (play.texcraft.dev), `FileSystem`-trait embedding. **Gaps (verified by spike):** no e-TeX primitives so `latex.ltx` can't run, no shipout pipeline, no math typesetting — it executes TeX, doesn't yet emit pages. |
 
-Recommended path: **B as the shipping engine** (embedded Tectonic core —
-the product works from a single MSI, no distro install), **C as an
-optional escape hatch**, and **A as the long-horizon R&D track** —
-incremental retypesetting, real file:line diagnostics and clean wasm are
-things a wrapped engine can never do. The differentiation analysis says
-the moat is the family pipeline + RTL + templates, not engine ownership,
-so B buys the product while A matures. Knuth–Plass line breaking and
-math typesetting are published algorithms — clean-room is legitimate;
-the "TeX" name is not claimed (name-restriction), product stays
-"TexCraft, LaTeX-compatible".
+Spike result (validated by embedding, ~50 lines, git-dep pinned):
+`texlang` + `texlang-stdlib` run real TeX semantics from our own process —
+`\def`/#param macros, `\count`/`\advance`/`\the`, `\ifnum`/`\ifcase`,
+`\csname`, `\input` through a swappable `FileSystem` trait — with
+positioned caret diagnostics. One real hazard: macro expansion recurses
+on the host stack with no depth bound (`\def\a{\a}\a` overflows), so any
+embedded VM must run on a bounded worker thread.
+
+Recommended path: **C is live now** (system TeX compiles + previews
+today), **B as the shipping engine** (embedded Tectonic core — the product
+works from a single MSI, no distro install), and **A becomes A′ — own
+typesetter built on the texlang/boxworks foundation** rather than from
+scratch: incremental retypesetting, real file:line diagnostics and clean
+wasm are things a wrapped engine can never do, and the MIT license lets us
+depend instead of copy. The differentiation analysis says the moat is the
+family pipeline + RTL + templates, not engine ownership, so B/C buy the
+product while A′ matures. Knuth–Plass line breaking and math typesetting
+are published algorithms — clean-room is legitimate; the "TeX" name is
+not claimed (name-restriction), product stays "TexCraft, LaTeX-compatible".
+
+Note: "texcraft" (crate, repo, texcraft.dev) is already the JF project's
+name — a product rename decision is deferred to before public v1.
 
 Bibliography: implement BibTeX-semantics ourselves (the .bst stack
 language is small) **or** go straight to a citeproc-style CSL pipeline —
@@ -221,9 +234,12 @@ apps/texcraft     — studio app + TCP control server, L7
 3. History: bundle a tiny git backend vs own snapshot format?
 4. Editor: egui `TextEdit` (consistent, limited) vs a richer editor
    widget crate — syntax highlighting is needed regardless.
-5. Name: TexCraft conflicts with the "TeX" trademark naming rule?
-   ("TexCraft" is a distinct product name, not claiming to be TeX —
-   same convention as "MATLAB-class" wording.)
+5. Name: **decision deferred to before public v1.** "texcraft" is taken
+   (jamespfennell's project — crates.io, GitHub, texcraft.dev), separate
+   from the TeX-trademark naming rule ("TexCraft" is a distinct product
+   name, not claiming to be TeX — same convention as "MATLAB-class"
+   wording). A rename also avoids `texcraft.exe` colliding with their
+   `texcraft` CLI if we depend on their crates.
 6. Template-library licensing: `Templates/` is already LPPL-1.3c —
    clean to ship. The `arabic-template` collection's skill wrapper is
    CC-BY-NC-4.0, but the maintainer owns it — relicensing the bundled
