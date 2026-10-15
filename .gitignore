@@ -1,2 +1,12 @@
 target/
 .texcraft/
+
+# TeX build artifacts from in-place example compiles
+examples/*.aux
+examples/*.bbl
+examples/*.blg
+examples/*.fdb_latexmk
+examples/*.fls
+examples/*.log
+examples/*.pdf
+examples/*.synctex.gz
