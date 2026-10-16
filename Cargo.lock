@@ -721,6 +721,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-atomic"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=457a078809690994b22debdffb703ff36d3129df#457a078809690994b22debdffb703ff36d3129df"
+dependencies = [
+ "rustix 1.1.5",
+]
+
+[[package]]
+name = "craft-quit"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=457a078809690994b22debdffb703ff36d3129df#457a078809690994b22debdffb703ff36d3129df"
+dependencies = [
+ "dispatch2",
+ "egui",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3197,6 +3216,7 @@ dependencies = [
 name = "texcraft-engine"
 version = "0.1.0"
 dependencies = [
+ "craft-atomic",
  "serde_json",
  "texparse",
 ]
@@ -3205,6 +3225,8 @@ dependencies = [
 name = "texcraft-ui-egui"
 version = "0.1.0"
 dependencies = [
+ "craft-atomic",
+ "craft-quit",
  "eframe",
  "egui",
  "hayro",

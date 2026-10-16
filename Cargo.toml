@@ -18,3 +18,9 @@ unreachable = "deny"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+[workspace.dependencies]
+# Shared Craft-family libraries (storytold/craft-libs), pinned like the
+# sibling workspaces (matcraft, ProjectsCraft, reportcraft).
+craft-atomic = { git = "https://github.com/storytold/craft-libs", rev = "457a078809690994b22debdffb703ff36d3129df" }
+craft-quit = { git = "https://github.com/storytold/craft-libs", rev = "457a078809690994b22debdffb703ff36d3129df", features = ["egui"] }

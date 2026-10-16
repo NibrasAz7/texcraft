@@ -906,7 +906,7 @@ impl TexApp {
             let res = if entry.is_dir {
                 std::fs::create_dir(&path).map_err(|e| e.to_string())
             } else {
-                std::fs::write(&path, "").map_err(|e| e.to_string())
+                craft_atomic::atomic_write(&path, b"").map_err(|e| e.to_string())
             };
             match res {
                 Ok(()) => {
@@ -1123,18 +1123,27 @@ mod tests {
 }
 
 impl eframe::App for TexApp {
+    /// Non-painting work — runs every frame, also while the window is
+    /// minimized or hidden (a finished compile still drains there).
+    /// `craft_quit::on_close_request` stays last: it quits through the
+    /// platform's own path where closing the window directly is unsafe
+    /// (macOS).
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.poll_compile(ctx);
+            self.tick_autocompile(ctx);
+        }
+        self.refresh_tree(ctx);
+        craft_quit::on_close_request(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if ctx.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.ctrl) {
             self.save();
         }
         handle_screenshot(&ctx);
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.poll_compile(&ctx);
-            self.tick_autocompile(&ctx);
-        }
-        self.refresh_tree(&ctx);
 
         self.top_bar(ui);
         self.sidebar(ui);

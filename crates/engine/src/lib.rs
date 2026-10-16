@@ -154,7 +154,7 @@ impl Session {
     /// Write the buffer back to its file.
     pub fn save(&mut self) -> Result<(), EngineError> {
         let Some(path) = self.path.clone() else { return Err(EngineError::NoFile) };
-        std::fs::write(&path, self.src.as_bytes())?;
+        craft_atomic::atomic_write(&path, self.src.as_bytes())?;
         self.dirty = false;
         Ok(())
     }
