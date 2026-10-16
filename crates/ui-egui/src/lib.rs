@@ -33,9 +33,16 @@ const GUTTER_W: f32 = 40.0;
 /// How often the project tree is rescanned, seconds.
 const TREE_SCAN_SECS: f64 = 1.5;
 
+/// A rasterized page plus its PDF size in points (top-left origin) —
+/// SyncTeX speaks points, so we need the pt dimensions to map clicks.
+struct Page {
+    img: egui::ColorImage,
+    pt: egui::Vec2,
+}
+
 /// A finished compile job: the report plus rasterized page images.
 #[cfg(not(target_arch = "wasm32"))]
-type CompileJob = Result<(CompileReport, Vec<egui::ColorImage>), String>;
+type CompileJob = Result<(CompileReport, Vec<Page>), String>;
 
 /// Preview zoom mode for the PDF pane.
 #[derive(Clone, Copy, PartialEq)]
@@ -44,6 +51,15 @@ enum Zoom {
     FitPage,
     Pct(f32),
 }
+
+/// A SyncTeX highlight on a preview page: which page, the box in PDF
+/// points, and the `ctx.input` timestamp it appeared at.
+struct Flash {
+    page: usize,
+    rect_pt: egui::Rect,
+    at: f64,
+}
+const FLASH_SECS: f64 = 1.6;
 
 /// What the "new entry" modal is creating, and where.
 struct NewEntry {
@@ -62,8 +78,12 @@ pub struct TexApp {
     compile_rx: Option<std::sync::mpsc::Receiver<CompileJob>>,
     report: Option<CompileReport>,
     pages: Vec<egui::TextureHandle>,
+    /// PDF point size per page, parallel to `pages`.
+    page_pts: Vec<egui::Vec2>,
+    pdf_path: Option<PathBuf>,
     page_idx: usize,
     zoom: Zoom,
+    flash: Option<Flash>,
 
     // Sidebar + editor chrome
     tree: Vec<files::Node>,
@@ -79,7 +99,16 @@ pub struct TexApp {
     engines: Vec<String>,
     engine_sel: Option<usize>,
     new_entry: Option<NewEntry>,
+
+    // Auto-compile after idle
+    autocompile: bool,
+    /// `ctx.input` timestamp of the last buffer edit.
+    last_edit: f64,
+    /// `last_edit` value at the last compile attempt — a failed compile
+    /// does not retrigger until the user edits again.
+    compiled_edit: f64,
 }
+const AUTOCOMPILE_IDLE_SECS: f64 = 5.0;
 
 impl TexApp {
     /// Create the app; `file` (optional) is opened at startup.
@@ -94,8 +123,11 @@ impl TexApp {
             compile_rx: None,
             report: None,
             pages: Vec::new(),
+            page_pts: Vec::new(),
+            pdf_path: None,
             page_idx: 0,
             zoom: Zoom::FitWidth,
+            flash: None,
             tree: Vec::new(),
             tree_scanned_at: f64::NEG_INFINITY,
             expanded: HashSet::new(),
@@ -107,6 +139,9 @@ impl TexApp {
             engines: Vec::new(),
             engine_sel: None,
             new_entry: None,
+            autocompile: false,
+            last_edit: f64::NEG_INFINITY,
+            compiled_edit: f64::NEG_INFINITY,
         };
         app.session = Session::with_source(DEFAULT_DOC.to_string());
         #[cfg(not(target_arch = "wasm32"))]
@@ -139,8 +174,11 @@ impl TexApp {
             Ok(()) => {
                 self.status.clear();
                 self.pages.clear();
+                self.page_pts.clear();
+                self.pdf_path = None;
                 self.report = None;
                 self.page_idx = 0;
+                self.flash = None;
                 self.reparse();
             }
             Err(e) => self.status = format!("cannot open {}: {e}", path.display()),
@@ -216,6 +254,7 @@ impl TexApp {
             return;
         }
         self.compiling = true;
+        self.compiled_edit = self.last_edit;
         self.status = "compiling…".into();
         let engine = self.engine_sel.and_then(|i| self.engines.get(i).cloned());
         let (tx, rx) = std::sync::mpsc::channel();
@@ -241,12 +280,12 @@ impl TexApp {
                     (true, n) => format!("{} — {} page(s), {n} error(s)", report.engine, report.pages.unwrap_or(0)),
                     (false, _) => format!("{} failed — {} error(s)", report.engine, report.errors.len()),
                 };
-                self.pages = images
-                    .iter()
-                    .enumerate()
-                    .map(|(i, img)| ctx.load_texture(format!("page-{i}"), img.clone(), egui::TextureOptions::LINEAR))
-                    .collect();
+                self.page_pts = images.iter().map(|p| p.pt).collect();
+                self.pages =
+                    images.into_iter().enumerate().map(|(i, p)| ctx.load_texture(format!("page-{i}"), p.img, egui::TextureOptions::LINEAR)).collect();
+                self.pdf_path = report.pdf.clone();
                 self.page_idx = self.page_idx.min(self.pages.len().saturating_sub(1));
+                self.flash = None;
                 self.report = Some(report);
                 self.compiling = false;
                 self.compile_rx = None;
@@ -290,6 +329,83 @@ impl TexApp {
         }
     }
 
+    /// Ctrl+click in the editor → SyncTeX forward: flash the matching box
+    /// in the PDF preview and scroll to it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn forward_sync(&mut self, now: f64) {
+        let (Some(pdf), Some(src)) = (self.pdf_path.clone(), self.session.path().map(Path::to_path_buf)) else {
+            self.status = "compile first — no SyncTeX data".into();
+            return;
+        };
+        // synctex records absolute source paths.
+        let src = src.canonicalize().unwrap_or(src);
+        let (line, col) = self.cursor_lc;
+        // synctex columns are byte offsets; our cursor_lc is char-based.
+        let text = self.session.source();
+        let byte_col = text
+            .split('\n')
+            .nth(line.saturating_sub(1))
+            .map(|l| l.chars().take(col.saturating_sub(1)).map(|c| c.len_utf8()).sum::<usize>() + 1)
+            .unwrap_or(col);
+        match texcraft_engine::synctex::forward(&pdf, &src, line as u32, byte_col as u32) {
+            Ok(locs) => match locs.first() {
+                Some(loc) => {
+                    self.page_idx = (loc.page as usize).saturating_sub(1).min(self.pages.len().saturating_sub(1));
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(loc.h as f32, loc.v as f32),
+                        egui::vec2(loc.width.max(4.0) as f32, loc.height.max(6.0) as f32),
+                    );
+                    self.flash = Some(Flash { page: self.page_idx, rect_pt: r, at: now });
+                }
+                None => self.status = format!("no SyncTeX record at line {line}"),
+            },
+            Err(e) => self.status = format!("synctex: {e}"),
+        }
+    }
+
+    /// Click on a PDF page → SyncTeX inverse: move the editor caret to the
+    /// source position (opening the file if the hit lands elsewhere).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn inverse_sync(&mut self, page_rect: egui::Rect, pos: egui::Pos2) {
+        let (Some(pdf), Some(pt)) = (self.pdf_path.clone(), self.page_pts.get(self.page_idx).copied()) else { return };
+        let frac = (pos - page_rect.min) / page_rect.size();
+        let (x, y) = ((frac.x * pt.x) as f64, (frac.y * pt.y) as f64);
+        match texcraft_engine::synctex::inverse(&pdf, (self.page_idx + 1) as u32, x, y) {
+            Ok(Some(loc)) => {
+                // synctex reports absolute paths; compare canonicalized.
+                let cur = self.session.path().and_then(|p| p.canonicalize().ok());
+                if cur.as_deref() != Some(loc.file.as_path()) {
+                    self.open_path(loc.file.clone());
+                }
+                let line = loc.line as usize;
+                let col = loc.column.unwrap_or(1) as usize;
+                self.goto = Some(offset_of_line_col(self.session.source(), line, col));
+                self.status = format!(
+                    "jumped to {}:{line}",
+                    loc.file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| loc.file.display().to_string())
+                );
+            }
+            Ok(None) => self.status = "no SyncTeX record at that point".into(),
+            Err(e) => self.status = format!("synctex: {e}"),
+        }
+    }
+
+    /// Auto-compile: recompile once the buffer has been idle for
+    /// AUTOCOMPILE_IDLE_SECS. A failed compile marks the edit as
+    /// "compiled" so we don't hot-loop — the next edit retriggers.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tick_autocompile(&mut self, ctx: &egui::Context) {
+        if !self.autocompile || self.compiling || self.last_edit <= self.compiled_edit || self.session.path().is_none() {
+            return;
+        }
+        let idle = ctx.input(|i| i.time) - self.last_edit;
+        if idle >= AUTOCOMPILE_IDLE_SECS {
+            self.start_compile();
+        } else {
+            ctx.request_repaint_after_secs((AUTOCOMPILE_IDLE_SECS - idle) as f32);
+        }
+    }
+
     // ---------- chrome ----------
 
     /// Top bar: project identity, save state, compile + toggles.
@@ -330,6 +446,8 @@ impl TexApp {
                                 self.engine_sel = Some(i);
                             }
                         }
+                        ui.separator();
+                        ui.checkbox(&mut self.autocompile, "auto-compile after 5 s idle");
                     });
                     if self.compiling {
                         ui.spinner();
@@ -489,10 +607,16 @@ impl TexApp {
                 .show(ui);
             if out.response.changed() {
                 self.session.set_source(src.clone());
+                self.last_edit = ui.ctx().input(|i| i.time);
                 self.reparse();
             }
             self.paint_gutter(ui, &out, &src);
             self.track_cursor(ui.ctx(), editor_id, &src);
+            #[cfg(not(target_arch = "wasm32"))]
+            if out.response.clicked() && ui.ctx().input(|i| i.modifiers.command) {
+                let now = ui.ctx().input(|i| i.time);
+                self.forward_sync(now);
+            }
         });
     }
 
@@ -639,12 +763,49 @@ impl TexApp {
                     };
                     let size = tsize * zoom;
                     let needed = egui::vec2(size.x + 48.0, size.y + 48.0);
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(needed.x.max(area.width()), needed.y.max(area.height())), egui::Sense::hover());
+                    let (rect, page_resp) =
+                        ui.allocate_exact_size(egui::vec2(needed.x.max(area.width()), needed.y.max(area.height())), egui::Sense::hover());
                     let page = egui::Rect::from_center_size(rect.center(), size);
                     let painter = ui.painter();
                     painter.rect_filled(page.translate(egui::vec2(2.0, 4.0)), 2.0, egui::Color32::from_black_alpha(120));
                     painter.image(tex.id(), page, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0, 1.0)), egui::Color32::WHITE);
                     painter.rect_stroke(page, 0.0, egui::Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Outside);
+
+                    // SyncTeX flash: highlight the forward-search box, fade
+                    // out over FLASH_SECS, and scroll it into view once.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(f) = &self.flash {
+                        if f.page == self.page_idx {
+                            let age = ui.ctx().input(|i| i.time) - f.at;
+                            let pt = self.page_pts.get(self.page_idx).copied().unwrap_or(tsize);
+                            let scale = egui::vec2(page.width() / pt.x.max(1.0), page.height() / pt.y.max(1.0));
+                            let r = egui::Rect::from_min_size(
+                                page.min + egui::vec2(f.rect_pt.min.x * scale.x, f.rect_pt.min.y * scale.y),
+                                egui::vec2(f.rect_pt.width() * scale.x, f.rect_pt.height() * scale.y),
+                            );
+                            if age < FLASH_SECS {
+                                let a = (1.0 - (age / FLASH_SECS) as f32).clamp(0.0, 1.0);
+                                painter.rect_filled(r, 2.0, theme::ACCENT.gamma_multiply(0.25 * a));
+                                painter.rect_stroke(r, 2.0, egui::Stroke::new(1.5, theme::ACCENT.gamma_multiply(a)), egui::StrokeKind::Inside);
+                                ui.ctx().request_repaint();
+                            }
+                            if age < 0.3 {
+                                ui.scroll_to_rect(r.expand(90.0), Some(egui::Align::Center));
+                            }
+                        }
+                    }
+
+                    // SyncTeX inverse: click on the page jumps the caret.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let hit = ui.interact(page, ui.id().with("pdf-hit"), egui::Sense::click());
+                        if hit.clicked() {
+                            if let Some(pos) = hit.interact_pointer_pos() {
+                                self.inverse_sync(page, pos);
+                            }
+                        }
+                        let _ = page_resp;
+                    }
                 });
             });
     }
@@ -772,6 +933,19 @@ fn handle_screenshot(ctx: &egui::Context) {
     }
 }
 
+/// Byte offset of (1-based `line`, 1-based byte `col`) in `src`.
+/// Input-derived values: clamps instead of panicking.
+fn offset_of_line_col(src: &str, line: usize, col: usize) -> usize {
+    let mut off = 0usize;
+    for (i, l) in src.split('\n').enumerate() {
+        if i + 1 == line {
+            return (off + col.saturating_sub(1)).min(off + l.len());
+        }
+        off = off.saturating_add(l.len()).saturating_add(1);
+    }
+    src.len()
+}
+
 /// The `pos`/`title` heading row colour, by level.
 fn outline_color(level: u8) -> egui::Color32 {
     match level {
@@ -879,8 +1053,10 @@ fn compile_and_render(path: &Path, engine: Option<&str>) -> CompileJob {
         let scale = PREVIEW_SCALE.min(MAX_PREVIEW_PX / w.max(h).max(1.0));
         let pixmap_settings = hayro::PixmapSettings { x_scale: scale, y_scale: scale, bg_color: hayro::vello_cpu::color::palette::css::WHITE };
         let pixmap = hayro::render(page, &cache, &interp, &settings, &pixmap_settings);
-        images
-            .push(egui::ColorImage::from_rgba_premultiplied([usize::from(pixmap.width()), usize::from(pixmap.height())], pixmap.data_as_u8_slice()));
+        images.push(Page {
+            img: egui::ColorImage::from_rgba_premultiplied([usize::from(pixmap.width()), usize::from(pixmap.height())], pixmap.data_as_u8_slice()),
+            pt: egui::vec2(w, h),
+        });
     }
     Ok((report, images))
 }
@@ -898,7 +1074,7 @@ mod tests {
             Ok((report, pages)) => {
                 assert!(report.errors.is_empty(), "compile errors: {:?}", report.errors);
                 assert!(!pages.is_empty(), "no pages rendered");
-                assert!(pages.iter().all(|p| p.size[0] > 0 && p.size[1] > 0));
+                assert!(pages.iter().all(|p| p.img.size[0] > 0 && p.img.size[1] > 0 && p.pt.x > 0.0 && p.pt.y > 0.0));
             }
             Err(e) => {
                 assert!(e.contains("no TeX engine"), "unexpected failure: {e}");
@@ -915,7 +1091,10 @@ impl eframe::App for TexApp {
         }
         handle_screenshot(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
-        self.poll_compile(&ctx);
+        {
+            self.poll_compile(&ctx);
+            self.tick_autocompile(&ctx);
+        }
         self.refresh_tree(&ctx);
 
         self.top_bar(ui);
