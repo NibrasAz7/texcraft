@@ -461,8 +461,7 @@ impl TexApp {
                         self.outline_open = !self.outline_open;
                     }
                     ui.separator();
-                    let mode = if theme::is_dark() { "Dark" } else { "Light" };
-                    if ui.button(mode).on_hover_text("switch theme").clicked() {
+                    if theme_toggle(ui).clicked() {
                         theme::apply(ui.ctx(), !theme::is_dark());
                     }
                 });
@@ -960,6 +959,30 @@ fn offset_of_line_col(src: &str, line: usize, col: usize) -> usize {
         off = off.saturating_add(l.len()).saturating_add(1);
     }
     src.len()
+}
+
+/// Painted light/dark toggle — a sun in light mode, a crescent in dark
+/// (drawn geometry, so no icon font is needed).
+fn theme_toggle(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 20.0), egui::Sense::click());
+    let resp = resp.on_hover_text(if theme::is_dark() { "switch to light theme" } else { "switch to dark theme" });
+    let p = ui.painter();
+    let c = rect.center();
+    let ink = if resp.hovered() { theme::pal().text } else { theme::pal().muted };
+    if theme::is_dark() {
+        // Crescent: filled disc with the panel colour bitten out.
+        p.circle_filled(c, 6.0, ink);
+        p.circle_filled(c + egui::vec2(3.0, -2.0), 5.0, theme::pal().top_bg);
+    } else {
+        // Sun: stroked disc + 8 rays.
+        p.circle_stroke(c, 4.5, egui::Stroke::new(1.4, ink));
+        for i in 0..8 {
+            let a = i as f32 * std::f32::consts::FRAC_PI_4;
+            let dir = egui::vec2(a.cos(), a.sin());
+            p.line_segment([c + dir * 6.2, c + dir * 8.6], egui::Stroke::new(1.4, ink));
+        }
+    }
+    resp
 }
 
 /// The `pos`/`title` heading row colour, by level.
