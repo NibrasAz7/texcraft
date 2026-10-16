@@ -13,7 +13,7 @@ use crate::theme;
 /// wrap).
 pub fn layout(ui: &egui::Ui, src: &dyn egui::TextBuffer, _wrap: f32) -> Arc<egui::Galley> {
     let font_id = egui::TextStyle::Monospace.resolve(ui.style());
-    let plain = TextFormat { font_id: font_id.clone(), color: theme::TEXT, ..Default::default() };
+    let plain = TextFormat { font_id: font_id.clone(), color: theme::pal().text, ..Default::default() };
     let fmt = |color| TextFormat { color, ..plain.clone() };
 
     // The job owns the text; sections are contiguous byte ranges into it.
@@ -31,14 +31,14 @@ pub fn layout(ui: &egui::Ui, src: &dyn egui::TextBuffer, _wrap: f32) -> Arc<egui
             job.sections.push(LayoutSection { leading_space: 0.0, byte_range: ByteIndex(cursor)..ByteIndex(tok.pos.offset), format: plain.clone() });
         }
         let format = match &tok.kind {
-            Tok::Comment(_) => fmt(theme::SYN_COMMENT),
-            Tok::Cmd(_) | Tok::CmdSym(_) => fmt(if in_math { theme::SYN_MATH } else { theme::SYN_CMD }),
+            Tok::Comment(_) => fmt(theme::pal().syn_comment),
+            Tok::Cmd(_) | Tok::CmdSym(_) => fmt(if in_math { theme::pal().syn_math } else { theme::pal().syn_cmd }),
             Tok::MathShift => {
                 in_math = !in_math;
-                fmt(theme::SYN_MATH)
+                fmt(theme::pal().syn_math)
             }
-            Tok::LBrace | Tok::RBrace | Tok::LBracket | Tok::RBracket => fmt(theme::SYN_BRACE),
-            Tok::Text(_) | Tok::Newline => fmt(if in_math { theme::SYN_MATH } else { theme::TEXT }),
+            Tok::LBrace | Tok::RBrace | Tok::LBracket | Tok::RBracket => fmt(theme::pal().syn_brace),
+            Tok::Text(_) | Tok::Newline => fmt(if in_math { theme::pal().syn_math } else { theme::pal().text }),
         };
         job.sections.push(LayoutSection { leading_space: 0.0, byte_range: ByteIndex(tok.pos.offset)..ByteIndex(tok.end), format });
         cursor = tok.end;

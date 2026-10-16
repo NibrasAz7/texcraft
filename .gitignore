@@ -11,3 +11,6 @@ examples/*.log
 examples/*.pdf
 examples/*.synctex.gz
 texcraft-shot.png
+
+# Bundled Tectonic engine binary (fetch via scripts/fetch-tectonic.ps1)
+bin/

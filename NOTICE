@@ -7,3 +7,7 @@ Licensed under MIT OR Apache-2.0 — see LICENSE-MIT and LICENSE-APACHE.
 TexCraft is an original clean-room LaTeX authoring environment. It contains
 no code, documentation text, artwork or other proprietary material from
 TeXstudio, Overleaf, TeX Live or any other TeX distribution or editor.
+
+Optional bundled engine: Tectonic (https://tectonic-typesetting.github.io),
+MIT License — fetched by `scripts/fetch-tectonic.ps1` into `bin/` and
+invoked as a subprocess, never linked or copied into TexCraft's source.

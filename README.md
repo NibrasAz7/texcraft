@@ -10,12 +10,16 @@ Reference target: Overleaf's editor surface (see `docs/reference/` notes;
 screenshots of the public product used only as UX reference, never for
 assets or code).
 
-**Status: alpha.** Working today: the egui studio (editor, structure
-outline, real PDF preview via a system TeX engine — MiKTeX/TeX Live),
-log-driven compile reruns, bibtex/biber passes, SyncTeX command plumbing,
-and a headless CLI. Not yet: embedded typesetter, SyncTeX click-through,
-project tree, multi-file awareness, history, RTL, templates. See
-[`ROADMAP.md`](ROADMAP.md) for the milestone plan.
+**Status: alpha.** Working today: the egui studio (LocalLeaf-class
+three-pane layout — file tree, guttered syntax-highlighted editor, PDF
+preview — with light/dark themes), compile through a bundled `tectonic`
+(Track B-lite, no TeX install; `scripts/fetch-tectonic.ps1` drops the
+binary in `bin/`) or any system TeX on PATH, log-driven reruns and
+bibtex/biber passes, SyncTeX click-through both directions
+(Ctrl+click source → PDF highlight, click PDF → caret jump), an opt-in
+5-second-idle auto-compile, and a headless CLI. Not yet: in-process
+typesetter (B/A′), project-wide multi-file awareness, history, RTL,
+templates. See [`ROADMAP.md`](ROADMAP.md) for the milestone plan.
 
 ## What it is
 

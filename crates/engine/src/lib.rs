@@ -3,11 +3,13 @@
 //! M0 scope: `Session` holds the open document (path, source, dirty flag)
 //! and `execute()` dispatches the first command set — `document.open`,
 //! `document.save`, `document.compile`, `source.set`, `source.get`,
-//! `structure.get`. `document.compile` runs a **system TeX** engine
-//! (xelatex/lualatex/pdflatex probed on PATH) into a `.texcraft/` build
-//! directory next to the document, parses the log, and reports the PDF
-//! path. Shell escape is never enabled. Tectonic embedding replaces this
-//! invocation in M1+; the command id and report shape stay.
+//! `structure.get`. `document.compile` runs a TeX engine into a
+//! `.texcraft/` build directory next to the document, parses the log,
+//! and reports the PDF path. Engine preference: a bundled or PATH
+//! `tectonic` (Track B-lite, zero TeX install) first, then system
+//! xelatex/lualatex/pdflatex on PATH (Track C). Shell escape is never
+//! enabled — Tectonic has no equivalent flag and the system engines
+//! are never passed one.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -229,22 +231,81 @@ fn structure_json(d: &DocStructure) -> Value {
 /// preference order (Unicode engines first).
 const ENGINE_CANDIDATES: &[&str] = &["xelatex", "lualatex", "pdflatex"];
 
-/// Engine binaries found on PATH — for UI pickers. Order matches
-/// `compile_file`'s preference.
-pub fn detect_engines() -> Vec<String> {
-    ENGINE_CANDIDATES
-        .iter()
-        .filter(|c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false))
-        .map(|c| c.to_string())
-        .collect()
+/// A resolved engine: display name plus the program to invoke
+/// (a bare name for PATH tools, a full path for a bundled one).
+struct Engine {
+    name: String,
+    program: PathBuf,
 }
 
-/// Pick a TeX engine binary on PATH. `unicode` restricts to
-/// XeTeX/LuaTeX (required by fontspec/polyglossia/bidi documents).
-fn find_engine(unicode: bool) -> Option<String> {
+fn on_path(name: &str) -> bool {
+    Command::new(name).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Locate a usable `tectonic` binary, most-trusted first: the
+/// `TEXCRAFT_TECTONIC` env override, then bundled next to the app
+/// (installed layout), then `bin/` under the cwd or the workspace
+/// root (dev layout), finally PATH.
+fn find_tectonic() -> Option<PathBuf> {
+    let exe_name = if cfg!(windows) { "tectonic.exe" } else { "tectonic" };
+    if let Some(p) = std::env::var_os("TEXCRAFT_TECTONIC").map(PathBuf::from).filter(|p| p.is_file()) {
+        return Some(p);
+    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(dir) = exe_path.parent() {
+            candidates.push(dir.join(exe_name));
+            candidates.push(dir.join("bin").join(exe_name));
+            // dev layout: <ws>/target/debug/texcraft.exe → <ws>/bin/
+            if let Some(ws) = dir.ancestors().nth(2) {
+                candidates.push(ws.join("bin").join(exe_name));
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("bin").join(exe_name));
+    }
+    if let Some(p) = candidates.into_iter().find(|p| p.is_file()) {
+        return Some(p);
+    }
+    if on_path("tectonic") {
+        return Some(PathBuf::from("tectonic"));
+    }
+    None
+}
+
+/// Engine binaries found — for UI pickers. Bundled/PATH `tectonic`
+/// first (the zero-install engine), then system TeX on PATH.
+pub fn detect_engines() -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    if find_tectonic().is_some() {
+        found.push("tectonic".to_string());
+    }
+    found.extend(ENGINE_CANDIDATES.iter().filter(|c| on_path(c)).map(|c| c.to_string()));
+    found
+}
+
+/// Resolve an engine name to a runnable program.
+fn resolve_engine(name: &str) -> Option<Engine> {
+    if name == "tectonic" {
+        return find_tectonic().map(|p| Engine { name: name.to_string(), program: p });
+    }
+    if on_path(name) {
+        return Some(Engine { name: name.to_string(), program: PathBuf::from(name) });
+    }
+    None
+}
+
+/// Pick a TeX engine. Bundled/PATH `tectonic` wins — it is the
+/// zero-install engine and is XeTeX-based, so it also covers the
+/// `unicode` requirement; otherwise fall back to system TeX on PATH.
+fn find_engine(unicode: bool) -> Option<Engine> {
+    if let Some(p) = find_tectonic() {
+        return Some(Engine { name: "tectonic".to_string(), program: p });
+    }
     const UNICODE: [&str; 2] = ["xelatex", "lualatex"];
     let candidates: &[&str] = if unicode { &UNICODE } else { ENGINE_CANDIDATES };
-    candidates.iter().find(|c| Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)).map(|c| c.to_string())
+    candidates.iter().find(|c| on_path(c)).map(|c| Engine { name: c.to_string(), program: PathBuf::from(c) })
 }
 
 /// Compile `path` with a system TeX engine into `<dir>/.texcraft/`.
@@ -272,68 +333,86 @@ pub fn compile_file_with(path: &Path, src: Option<&str>, engine_override: Option
     let doc = parse_structure(src);
     let unicode = doc.packages.iter().any(|(p, _)| UNICODE_PACKAGES.contains(&p.as_str()));
     let engine = match engine_override {
-        Some(e) => e.to_string(),
+        Some(e) => resolve_engine(e).ok_or(EngineError::NoTexEngine)?,
         None => find_engine(unicode).ok_or(EngineError::NoTexEngine)?,
     };
 
     let outdir = parent.join(BUILD_DIR);
     std::fs::create_dir_all(&outdir)?;
 
-    // -output-directory is resolved relative to the process cwd, so pass
-    // the bare name; cwd is set to the document directory below.
-    // Never pass -shell-escape / -enable-write18: shell escape is banned.
-    let run_engine = || -> Result<std::process::Output, EngineError> {
-        Ok(Command::new(&engine)
-            .arg("-interaction=nonstopmode")
-            .arg("-halt-on-error")
-            .arg("-file-line-error")
-            .arg("-synctex=1")
-            .arg(format!("-output-directory={BUILD_DIR}"))
+    let output = if engine.name == "tectonic" {
+        // Tectonic runs its own latexmk-style loop internally
+        // (reruns, bibtex/biber) — one invocation. V1 single-file
+        // mode: no -shell-escape equivalent exists, shell escape is
+        // banned by design.
+        Command::new(&engine.program)
+            .arg("--keep-logs")
+            .arg("--synctex")
+            .arg("--outdir")
+            .arg(&outdir)
             .arg(name.as_ref())
             .current_dir(parent)
-            .output()?)
-    };
-
-    let mut output = run_engine()?;
-
-    // Bibliography + rerun passes, latexmk-style: driven by the artifacts
-    // the first pass produced and by what the log asks for — not by a fixed
-    // sequence or by scanning the source. `.bcf` → biber (biblatex);
-    // `\bibdata` in the .aux → bibtex (classic \bibliography). A log that
-    // asks for a rerun ("Rerun to get cross-references right", label
-    // changes, bib requests) gets one, capped.
-    const MAX_RERUNS: u32 = 4;
-    if output.status.success() {
-        let bcf = outdir.join(format!("{stem}.bcf"));
-        let aux = outdir.join(format!("{stem}.aux"));
-        let needs_bibtex = std::fs::read_to_string(&aux).map(|s| s.contains("\\bibdata")).unwrap_or(false);
-        let bib_tool = if bcf.is_file() {
-            Some("biber")
-        } else if needs_bibtex {
-            Some("bibtex")
-        } else {
-            None
+            .output()?
+    } else {
+        // -output-directory is resolved relative to the process cwd, so
+        // pass the bare name; cwd is set to the document directory below.
+        // Never pass -shell-escape / -enable-write18: shell escape is
+        // banned.
+        let run_engine = || -> Result<std::process::Output, EngineError> {
+            Ok(Command::new(&engine.program)
+                .arg("-interaction=nonstopmode")
+                .arg("-halt-on-error")
+                .arg("-file-line-error")
+                .arg("-synctex=1")
+                .arg(format!("-output-directory={BUILD_DIR}"))
+                .arg(name.as_ref())
+                .current_dir(parent)
+                .output()?)
         };
-        if let Some(tool) = bib_tool {
-            // The aux/bcf live in the out dir; the .bib lives next to the
-            // source — BIBINPUTS/BSTINPUTS bridge the gap.
-            let abs_parent = std::path::absolute(parent)?;
-            let sep = if cfg!(windows) { ";" } else { ":" };
-            let _ = Command::new(tool)
-                .arg(stem.as_ref())
-                .current_dir(&outdir)
-                .env("BIBINPUTS", format!("{}{sep}", abs_parent.display()))
-                .env("BSTINPUTS", format!("{}{sep}", abs_parent.display()))
-                .output();
-            output = run_engine()?;
+
+        let mut output = run_engine()?;
+
+        // Bibliography + rerun passes, latexmk-style: driven by the
+        // artifacts the first pass produced and by what the log asks
+        // for — not by a fixed sequence or by scanning the source.
+        // `.bcf` → biber (biblatex); `\bibdata` in the .aux → bibtex
+        // (classic \bibliography). A log that asks for a rerun
+        // ("Rerun to get cross-references right", label changes, bib
+        // requests) gets one, capped.
+        const MAX_RERUNS: u32 = 4;
+        if output.status.success() {
+            let bcf = outdir.join(format!("{stem}.bcf"));
+            let aux = outdir.join(format!("{stem}.aux"));
+            let needs_bibtex = std::fs::read_to_string(&aux).map(|s| s.contains("\\bibdata")).unwrap_or(false);
+            let bib_tool = if bcf.is_file() {
+                Some("biber")
+            } else if needs_bibtex {
+                Some("bibtex")
+            } else {
+                None
+            };
+            if let Some(tool) = bib_tool {
+                // The aux/bcf live in the out dir; the .bib lives next
+                // to the source — BIBINPUTS/BSTINPUTS bridge the gap.
+                let abs_parent = std::path::absolute(parent)?;
+                let sep = if cfg!(windows) { ";" } else { ":" };
+                let _ = Command::new(tool)
+                    .arg(stem.as_ref())
+                    .current_dir(&outdir)
+                    .env("BIBINPUTS", format!("{}{sep}", abs_parent.display()))
+                    .env("BSTINPUTS", format!("{}{sep}", abs_parent.display()))
+                    .output();
+                output = run_engine()?;
+            }
+            let log_path = outdir.join(format!("{stem}.log"));
+            let mut passes = 0u32;
+            while output.status.success() && passes < MAX_RERUNS && log_needs_rerun(&log_path) {
+                output = run_engine()?;
+                passes += 1;
+            }
         }
-        let log_path = outdir.join(format!("{stem}.log"));
-        let mut passes = 0u32;
-        while output.status.success() && passes < MAX_RERUNS && log_needs_rerun(&log_path) {
-            output = run_engine()?;
-            passes += 1;
-        }
-    }
+        output
+    };
 
     let log_path = outdir.join(format!("{stem}.log"));
     let log = std::fs::read_to_string(&log_path).unwrap_or_else(|_| {
@@ -349,7 +428,7 @@ pub fn compile_file_with(path: &Path, src: Option<&str>, engine_override: Option
     tail.reverse();
     let log_tail = tail.join("\n");
 
-    Ok(CompileReport { engine, pdf, pages, errors, warnings, log_tail })
+    Ok(CompileReport { engine: engine.name, pdf, pages, errors, warnings, log_tail })
 }
 
 /// The TeX log asks for another pass — cross-reference rerun requests,

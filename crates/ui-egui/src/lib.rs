@@ -113,7 +113,7 @@ const AUTOCOMPILE_IDLE_SECS: f64 = 5.0;
 impl TexApp {
     /// Create the app; `file` (optional) is opened at startup.
     pub fn new(_cc: &eframe::CreationContext<'_>, file: Option<PathBuf>) -> Self {
-        theme::apply(&_cc.egui_ctx);
+        theme::apply(&_cc.egui_ctx, true);
         let mut app = TexApp {
             session: Session::new(),
             doc: DocStructure::default(),
@@ -410,10 +410,10 @@ impl TexApp {
 
     /// Top bar: project identity, save state, compile + toggles.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::top("topbar").frame(egui::Frame::new().fill(theme::TOP_BG).inner_margin(egui::Margin::symmetric(12, 7))).show(ui, |ui| {
+        egui::Panel::top("topbar").frame(egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(12, 7))).show(ui, |ui| {
             ui.horizontal(|ui| {
                 // Leaf-ish mark + project name + path.
-                ui.label(egui::RichText::new("❖").size(16.0).color(theme::ACCENT));
+                ui.label(egui::RichText::new("❖").size(16.0).color(theme::pal().accent));
                 let root = self.project_root();
                 let title = self
                     .session
@@ -421,20 +421,21 @@ impl TexApp {
                     .and_then(|p| p.parent().and_then(|d| d.file_name()).map(|d| d.to_string_lossy().into_owned()))
                     .unwrap_or_else(|| "untitled".into());
                 ui.label(egui::RichText::new(title).strong());
-                ui.label(egui::RichText::new(format!("~/…/{}", root.display())).small().color(theme::MUTED));
+                ui.label(egui::RichText::new(format!("~/…/{}", root.display())).small().color(theme::pal().muted));
                 let (chip, chip_col) =
-                    if self.session.dirty() { ("●  unsaved changes", theme::WARN) } else { ("✓  saved locally", theme::ACCENT_DIM) };
+                    if self.session.dirty() { ("●  unsaved changes", theme::pal().warn) } else { ("✓  saved locally", theme::pal().accent_dim) };
                 ui.label(egui::RichText::new(chip).small().color(chip_col));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Engine pick rides on Recompile's chevron.
-                    let recompile = egui::Button::new(egui::RichText::new("⟳  Recompile").color(egui::Color32::WHITE).strong()).fill(theme::ACCENT);
+                    let recompile =
+                        egui::Button::new(egui::RichText::new("⟳  Recompile").color(egui::Color32::WHITE).strong()).fill(theme::pal().accent);
                     let enabled = !self.compiling;
                     if ui.add_enabled(enabled, recompile).clicked() {
                         self.start_compile();
                     }
                     let menu_resp = ui
-                        .add_enabled(enabled, egui::Button::new(egui::RichText::new("⌄").color(egui::Color32::WHITE)).fill(theme::ACCENT_DIM))
+                        .add_enabled(enabled, egui::Button::new(egui::RichText::new("⌄").color(egui::Color32::WHITE)).fill(theme::pal().accent_dim))
                         .on_hover_text("compile options");
                     egui::Popup::from_toggle_button_response(&menu_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                         ui.set_min_width(140.0);
@@ -459,6 +460,11 @@ impl TexApp {
                     if ui.selectable_label(self.outline_open, "Outline").clicked() {
                         self.outline_open = !self.outline_open;
                     }
+                    ui.separator();
+                    let mode = if theme::is_dark() { "Dark" } else { "Light" };
+                    if ui.button(mode).on_hover_text("switch theme").clicked() {
+                        theme::apply(ui.ctx(), !theme::is_dark());
+                    }
                 });
             });
         });
@@ -470,7 +476,7 @@ impl TexApp {
             .resizable(true)
             .default_size(230.0)
             .size_range(160.0..=420.0)
-            .frame(egui::Frame::new().fill(theme::PANEL_BG).inner_margin(egui::Margin::symmetric(6, 6)))
+            .frame(egui::Frame::new().fill(theme::pal().panel_bg).inner_margin(egui::Margin::symmetric(6, 6)))
             .show(ui, |ui| {
                 // Icon row: new file / new folder / refresh / open.
                 ui.horizontal(|ui| {
@@ -526,7 +532,7 @@ impl TexApp {
 
                 if self.outline_open {
                     ui.separator();
-                    ui.label(egui::RichText::new("FILE OUTLINE").size(10.0).color(theme::FAINT).strong());
+                    ui.label(egui::RichText::new("FILE OUTLINE").size(10.0).color(theme::pal().faint).strong());
                     egui::ScrollArea::vertical().id_salt("outline").auto_shrink([false, true]).show(ui, |ui| {
                         if self.doc.headings.is_empty() {
                             ui.weak("(no headings)");
@@ -558,9 +564,9 @@ impl TexApp {
 
     /// Editor column: tab strip, guttered code editor, status strip.
     fn editor_pane(&mut self, ui: &mut egui::Ui) {
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::EDITOR_BG)).show(ui, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::pal().editor_bg)).show(ui, |ui| {
             // Tab strip
-            egui::Frame::new().fill(theme::TOP_BG).inner_margin(egui::Margin::symmetric(8, 0)).show(ui, |ui| {
+            egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(8, 0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let name = self
                         .session
@@ -569,16 +575,16 @@ impl TexApp {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| "untitled.tex".into());
                     let tab_frame = egui::Frame::new()
-                        .fill(theme::SELECTED)
+                        .fill(theme::pal().selected)
                         .inner_margin(egui::Margin::symmetric(10, 5))
-                        .stroke(egui::Stroke::new(1.0, theme::BORDER));
+                        .stroke(egui::Stroke::new(1.0, theme::pal().border));
                     tab_frame.show(ui, |ui| {
                         ui.label(egui::RichText::new(&name).size(12.0));
                         if self.main_file.as_deref() == self.session.path() {
-                            ui.label(egui::RichText::new("main document").size(9.5).color(theme::ACCENT));
+                            ui.label(egui::RichText::new("main document").size(9.5).color(theme::pal().accent));
                         }
                         if self.session.dirty() {
-                            ui.label(egui::RichText::new("●").size(9.0).color(theme::WARN));
+                            ui.label(egui::RichText::new("●").size(9.0).color(theme::pal().warn));
                         }
                     });
                 });
@@ -603,7 +609,12 @@ impl TexApp {
                 .desired_width(f32::INFINITY)
                 .min_size(avail)
                 .lock_focus(true)
-                .frame(egui::Frame::new().fill(theme::EDITOR_BG).inner_margin(egui::Margin { left: GUTTER_W as i8, right: 8, top: 4, bottom: 4 }))
+                .frame(egui::Frame::new().fill(theme::pal().editor_bg).inner_margin(egui::Margin {
+                    left: GUTTER_W as i8,
+                    right: 8,
+                    top: 4,
+                    bottom: 4,
+                }))
                 .show(ui);
             if out.response.changed() {
                 self.session.set_source(src.clone());
@@ -626,8 +637,8 @@ impl TexApp {
         let rect = out.response.rect;
         let band = egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + GUTTER_W, rect.bottom()));
         let painter = ui.painter().with_clip_rect(rect);
-        painter.rect_filled(band, 0.0, theme::EDITOR_BG);
-        painter.vline(band.right(), band.y_range(), egui::Stroke::new(1.0, theme::BORDER));
+        painter.rect_filled(band, 0.0, theme::pal().editor_bg);
+        painter.vline(band.right(), band.y_range(), egui::Stroke::new(1.0, theme::pal().border));
 
         let mono = egui::TextStyle::Monospace.resolve(ui.style());
         let (cur_line, _) = self.cursor_lc;
@@ -637,7 +648,7 @@ impl TexApp {
                 continue;
             }
             let cur = i + 1 == cur_line;
-            let color = if cur { theme::TEXT } else { theme::FAINT };
+            let color = if cur { theme::pal().text } else { theme::pal().faint };
             painter.text(egui::pos2(band.right() - 8.0, y), egui::Align2::RIGHT_TOP, format!("{}", i + 1), mono.clone(), color);
         }
         // Active line wash (after the gutter so it never hides numbers).
@@ -676,20 +687,25 @@ impl TexApp {
 
     /// Editor-column status strip: language, caret, issues.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::bottom("statusbar").frame(egui::Frame::new().fill(theme::TOP_BG).inner_margin(egui::Margin::symmetric(10, 3))).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("TeX").size(10.5).color(theme::SYN_CMD).strong());
-                ui.separator();
-                let n = self.doc.issues.len();
-                let msg = if n == 0 { "no issues".to_string() } else { format!("⚠ {n} issue{}", if n == 1 { "" } else { "s" }) };
-                ui.label(egui::RichText::new(msg).size(10.5).color(if n == 0 { theme::MUTED } else { theme::WARN }));
-                ui.separator();
-                ui.weak(&self.status);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(format!("Ln {}, Col {}", self.cursor_lc.0, self.cursor_lc.1)).size(10.5).color(theme::MUTED));
+        egui::Panel::bottom("statusbar").frame(egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(10, 3))).show(
+            ui,
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("TeX").size(10.5).color(theme::pal().syn_cmd).strong());
+                    ui.separator();
+                    let n = self.doc.issues.len();
+                    let msg = if n == 0 { "no issues".to_string() } else { format!("⚠ {n} issue{}", if n == 1 { "" } else { "s" }) };
+                    ui.label(egui::RichText::new(msg).size(10.5).color(if n == 0 { theme::pal().muted } else { theme::pal().warn }));
+                    ui.separator();
+                    ui.weak(&self.status);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("Ln {}, Col {}", self.cursor_lc.0, self.cursor_lc.1)).size(10.5).color(theme::pal().muted),
+                        );
+                    });
                 });
-            });
-        });
+            },
+        );
     }
 
     /// Right pane: page navigation toolbar + single-page canvas.
@@ -698,10 +714,10 @@ impl TexApp {
             .resizable(true)
             .default_size(460.0)
             .size_range(240.0..=900.0)
-            .frame(egui::Frame::new().fill(theme::CANVAS_BG))
+            .frame(egui::Frame::new().fill(theme::pal().canvas_bg))
             .show(ui, |ui| {
                 // Toolbar: ‹ n/m ›  ·  - zoom% +  fit ▾
-                egui::Frame::new().fill(theme::TOP_BG).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         let n = self.pages.len();
                         let has = n > 0;
@@ -711,7 +727,7 @@ impl TexApp {
                         ui.label(
                             egui::RichText::new(if has { format!("{} / {}", self.page_idx + 1, n) } else { "– / –".into() })
                                 .size(11.0)
-                                .color(theme::MUTED)
+                                .color(theme::pal().muted)
                                 .monospace(),
                         );
                         if ui.add_enabled(has && self.page_idx + 1 < n, egui::Button::new("›").min_size(egui::vec2(22.0, 18.0))).clicked() {
@@ -722,7 +738,7 @@ impl TexApp {
                             self.zoom = Zoom::Pct(self.zoom_pct(ui) * 0.9);
                         }
                         let pct = self.zoom_label(ui);
-                        ui.label(egui::RichText::new(pct).size(11.0).color(theme::MUTED).monospace());
+                        ui.label(egui::RichText::new(pct).size(11.0).color(theme::pal().muted).monospace());
                         if ui.small_button("+").clicked() {
                             self.zoom = Zoom::Pct(self.zoom_pct(ui) * 1.1);
                         }
@@ -743,7 +759,7 @@ impl TexApp {
                 // Canvas: dark backdrop, one page centered with a shadow.
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                     let area = ui.available_rect_before_wrap();
-                    ui.painter().rect_filled(area, 0.0, theme::CANVAS_BG);
+                    ui.painter().rect_filled(area, 0.0, theme::pal().canvas_bg);
                     let Some(tex) = self.pages.get(self.page_idx) else {
                         ui.allocate_rect(area, egui::Sense::hover());
                         ui.painter().text(
@@ -751,7 +767,7 @@ impl TexApp {
                             egui::Align2::CENTER_CENTER,
                             if self.compiling { "compiling…" } else { "no PDF yet — press Recompile" },
                             egui::FontId::proportional(13.0),
-                            theme::FAINT,
+                            theme::pal().faint,
                         );
                         return;
                     };
@@ -769,7 +785,7 @@ impl TexApp {
                     let painter = ui.painter();
                     painter.rect_filled(page.translate(egui::vec2(2.0, 4.0)), 2.0, egui::Color32::from_black_alpha(120));
                     painter.image(tex.id(), page, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0, 1.0)), egui::Color32::WHITE);
-                    painter.rect_stroke(page, 0.0, egui::Stroke::new(1.0, theme::BORDER), egui::StrokeKind::Outside);
+                    painter.rect_stroke(page, 0.0, egui::Stroke::new(1.0, theme::pal().border), egui::StrokeKind::Outside);
 
                     // SyncTeX flash: highlight the forward-search box, fade
                     // out over FLASH_SECS, and scroll it into view once.
@@ -785,8 +801,8 @@ impl TexApp {
                             );
                             if age < FLASH_SECS {
                                 let a = (1.0 - (age / FLASH_SECS) as f32).clamp(0.0, 1.0);
-                                painter.rect_filled(r, 2.0, theme::ACCENT.gamma_multiply(0.25 * a));
-                                painter.rect_stroke(r, 2.0, egui::Stroke::new(1.5, theme::ACCENT.gamma_multiply(a)), egui::StrokeKind::Inside);
+                                painter.rect_filled(r, 2.0, theme::pal().accent.gamma_multiply(0.25 * a));
+                                painter.rect_stroke(r, 2.0, egui::Stroke::new(1.5, theme::pal().accent.gamma_multiply(a)), egui::StrokeKind::Inside);
                                 ui.ctx().request_repaint();
                             }
                             if age < 0.3 {
@@ -836,10 +852,10 @@ impl TexApp {
             .resizable(true)
             .default_size(130.0)
             .size_range(64.0..=400.0)
-            .frame(egui::Frame::new().fill(theme::TOP_BG).inner_margin(egui::Margin::symmetric(10, 4)))
+            .frame(egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(10, 4)))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("LOGS").size(10.0).color(theme::FAINT).strong());
+                    ui.label(egui::RichText::new("LOGS").size(10.0).color(theme::pal().faint).strong());
                     if let Some(r) = &self.report {
                         ui.weak(format!("{} · {} error(s) · {} warning(s)", r.engine, r.errors.len(), r.warnings.len()));
                     }
@@ -852,14 +868,14 @@ impl TexApp {
                                 Some(l) => format!("l.{l}  {}", e.message),
                                 None => e.message.clone(),
                             };
-                            ui.label(egui::RichText::new(msg).color(theme::ERROR).size(11.5));
+                            ui.label(egui::RichText::new(msg).color(theme::pal().error).size(11.5));
                         }
                         for w in &r.warnings {
-                            ui.label(egui::RichText::new(format!("warning: {}", w.message)).color(theme::WARN).size(11.5));
+                            ui.label(egui::RichText::new(format!("warning: {}", w.message)).color(theme::pal().warn).size(11.5));
                         }
                         if !r.log_tail.is_empty() {
                             ui.add_space(4.0);
-                            ui.label(egui::RichText::new(&r.log_tail).monospace().size(10.5).color(theme::MUTED));
+                            ui.label(egui::RichText::new(&r.log_tail).monospace().size(10.5).color(theme::pal().muted));
                         }
                     } else {
                         ui.weak("(no compile yet)");
@@ -949,10 +965,10 @@ fn offset_of_line_col(src: &str, line: usize, col: usize) -> usize {
 /// The `pos`/`title` heading row colour, by level.
 fn outline_color(level: u8) -> egui::Color32 {
     match level {
-        0 | 1 => theme::TEXT,
-        2 => theme::ACCENT,
-        3 => theme::WARN,
-        _ => theme::MUTED,
+        0 | 1 => theme::pal().text,
+        2 => theme::pal().accent,
+        3 => theme::pal().warn,
+        _ => theme::pal().muted,
     }
 }
 
@@ -963,10 +979,10 @@ fn tree_row(ui: &mut egui::Ui, n: &files::Node, current: bool, is_main: bool, op
     let indent = n.depth as f32 * 14.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), egui::Sense::click());
     if current || resp.hovered() {
-        ui.painter().rect_filled(rect, 0.0, if current { theme::SELECTED } else { theme::HOVERED });
+        ui.painter().rect_filled(rect, 0.0, if current { theme::pal().selected } else { theme::pal().hovered });
     }
     if current {
-        ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(2.5, h)), 0.0, theme::ACCENT);
+        ui.painter().rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(2.5, h)), 0.0, theme::pal().accent);
     }
     let mut x = rect.left() + 6.0 + indent;
     let painter = ui.painter();
@@ -978,27 +994,27 @@ fn tree_row(ui: &mut egui::Ui, n: &files::Node, current: bool, is_main: bool, op
         } else {
             vec![egui::pos2(x, cy - 3.5), egui::pos2(x, cy + 3.5), egui::pos2(x + 6.0, cy)]
         };
-        painter.add(egui::Shape::convex_polygon(pts, theme::MUTED, egui::Stroke::NONE));
+        painter.add(egui::Shape::convex_polygon(pts, theme::pal().muted, egui::Stroke::NONE));
         x += 12.0;
         // folder glyph: tab + body
         let (fx, fy) = (x, cy - 4.5);
-        painter.rect_filled(egui::Rect::from_min_size(egui::pos2(fx, fy), egui::vec2(5.0, 3.0)), 1.0, theme::WARN);
-        painter.rect_filled(egui::Rect::from_min_size(egui::pos2(fx, fy + 2.0), egui::vec2(11.0, 8.0)), 1.0, theme::WARN);
+        painter.rect_filled(egui::Rect::from_min_size(egui::pos2(fx, fy), egui::vec2(5.0, 3.0)), 1.0, theme::pal().warn);
+        painter.rect_filled(egui::Rect::from_min_size(egui::pos2(fx, fy + 2.0), egui::vec2(11.0, 8.0)), 1.0, theme::pal().warn);
         x += 15.0;
     } else {
         x += 4.0;
         // document glyph: page with folded corner
         let (fx, fy) = (x, rect.center().y - 5.0);
         let col = match n.kind {
-            files::Kind::Tex => theme::SYN_MATH,
-            files::Kind::Bib => theme::WARN,
-            files::Kind::Style => theme::SYN_CMD,
-            files::Kind::Image => theme::SYN_BRACE,
-            _ => theme::MUTED,
+            files::Kind::Tex => theme::pal().syn_math,
+            files::Kind::Bib => theme::pal().warn,
+            files::Kind::Style => theme::pal().syn_cmd,
+            files::Kind::Image => theme::pal().syn_brace,
+            _ => theme::pal().muted,
         };
         let body = egui::Rect::from_min_size(egui::pos2(fx, fy), egui::vec2(9.0, 11.0));
         painter.rect_filled(body, 1.0, col);
-        painter.rect_filled(egui::Rect::from_min_size(egui::pos2(fx + 6.0, fy), egui::vec2(3.0, 3.0)), 0.0, theme::PANEL_BG);
+        painter.rect_filled(egui::Rect::from_min_size(egui::pos2(fx + 6.0, fy), egui::vec2(3.0, 3.0)), 0.0, theme::pal().panel_bg);
         x += 13.0;
     }
     painter.text(
@@ -1006,7 +1022,7 @@ fn tree_row(ui: &mut egui::Ui, n: &files::Node, current: bool, is_main: bool, op
         egui::Align2::LEFT_CENTER,
         &n.name,
         egui::FontId::proportional(11.5),
-        if current { theme::TEXT } else { theme::MUTED },
+        if current { theme::pal().text } else { theme::pal().muted },
     );
     if is_main {
         painter.text(
@@ -1014,7 +1030,7 @@ fn tree_row(ui: &mut egui::Ui, n: &files::Node, current: bool, is_main: bool, op
             egui::Align2::RIGHT_CENTER,
             "★",
             egui::FontId::proportional(10.0),
-            theme::ACCENT,
+            theme::pal().accent,
         );
     }
     resp.on_hover_text(n.path.display().to_string())
