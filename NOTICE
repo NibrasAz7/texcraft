@@ -11,3 +11,13 @@ TeXstudio, Overleaf, TeX Live or any other TeX distribution or editor.
 Optional bundled engine: Tectonic (https://tectonic-typesetting.github.io),
 MIT License — fetched by `scripts/fetch-tectonic.ps1` into `bin/` and
 invoked as a subprocess, never linked or copied into TexCraft's source.
+
+Third-party libraries:
+
+- craft-atomic, craft-quit, craft-settings, craft-print
+  (https://github.com/storytold/craft-libs) — MIT OR Apache-2.0.
+- craft-ai (https://github.com/NibrasAz7/craft-libs, feat/craft-ai) —
+  MIT OR Apache-2.0.
+- spellbook (https://github.com/helix-editor/spellbook) — MPL-2.0.
+  Hunspell dictionaries (en_US) are fetched by `scripts/fetch-dict.ps1`
+  into `dicts/` at user request and are not part of this distribution.

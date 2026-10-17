@@ -13,7 +13,10 @@
 //! named external tools (fixed argv, no shell — see [`tools`]).
 //! `template.*` commands serve the shipped template gallery (see
 //! [`templates`]); `project.snapshot`/`snapshot.*` keep local file
-//! history under `.texcraft/snapshots/` (see [`history`]).
+//! history under `.texcraft/snapshots/` (see [`history`]);
+//! `math.preview` compiles a selected math fragment for inline
+//! preview (see [`preview`]) and `text.stats` reports document
+//! statistics (see [`stats`]).
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -24,6 +27,8 @@ use serde_json::{json, Value};
 use texparse::{parse_magic, parse_structure, DocStructure};
 
 pub mod history;
+pub mod preview;
+pub mod stats;
 pub mod synctex;
 pub mod templates;
 pub mod tools;
@@ -276,6 +281,11 @@ impl Session {
                     })).collect::<Vec<_>>(),
                 }))
             }
+            // Inline math preview: fragment → scratch `.tex` → PDF
+            // under `.texcraft/preview/` for the UI to rasterize.
+            "math.preview" => preview::run(self, params),
+            // Document statistics (words, chars, math spans, …).
+            "text.stats" => stats::run(self, params),
             "project.snapshot" => history::snapshot(self, params),
             "snapshot.list" => history::list(self),
             "snapshot.read" => history::read(self, params),
@@ -720,6 +730,8 @@ mod tests {
             "template.list",
             "template.read",
             "template.new",
+            "math.preview",
+            "text.stats",
             "project.graph",
             "project.snapshot",
             "snapshot.list",

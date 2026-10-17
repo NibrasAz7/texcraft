@@ -19,7 +19,11 @@ texcraft-engine = { path = "../engine" }
 craft-atomic.workspace = true
 craft-quit.workspace = true
 craft-settings.workspace = true
+craft-print.workspace = true
 serde = { version = "1", features = ["derive"] }
+# Hunspell-compatible spellchecking (MPL-2.0, helix-editor) — dictionaries
+# live in dicts/ via scripts/fetch-dict.ps1.
+spellbook = "0.4"
 egui = "0.36"
 eframe = "0.36"
 serde_json = "1"
@@ -28,3 +32,6 @@ serde_json = "1"
 rfd = "0.17"
 hayro = "0.8"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# BYO-provider AI assist (OpenAI-compatible /v1) — the pinned rev's
+# Provider impl is native-only, so the dep itself stays off wasm.
+craft-ai.workspace = true

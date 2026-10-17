@@ -99,3 +99,17 @@ widget) are tracked there — nothing in M0 depends on them.
     toolbar; History window (snapshot now / two-click restore);
     craft-settings persistence — theme, autocompile, engine, zoom,
     panel visibility survive restarts (memory-stub on wasm).
+- M5 Wave-3 — editor intelligence + system features:
+  * texparse `stats.rs` — `DocStats`/`analyze` (words, chars, lines,
+    commands, math/env/label/cite counts), lexer-accurate.
+  * engine `preview.rs` + `stats.rs` — `math.preview` (scratch compile
+    through the real pipeline, magic-comment preamble, serialized) and
+    `text.stats` (delegates to texparse::analyze).
+  * ui-egui `spellcheck.rs` — spellbook (MPL-2.0) Hunspell checker,
+    dicts/ via fetch-dict.ps1; skips commands/comments/math/envs/
+    ref-args/verb; wavy underlines + right-click suggestions.
+  * ui-egui `mathprev.rs` — caret-in-math → worker compile → cached
+    texture preview floating bottom-right + span tint.
+  * ui-egui `mirrors.rs` + `ai.rs` — Ctrl+M occurrence-mirror editing
+    (bounded multi-caret), BYO-endpoint AI panel (craft-ai, native-only;
+    token never persisted); 🖨 print via craft-print; Stats window.

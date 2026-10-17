@@ -14,3 +14,6 @@ texcraft-shot.png
 
 # Bundled Tectonic engine binary (fetch via scripts/fetch-tectonic.ps1)
 bin/
+
+# Hunspell dictionaries (fetch via scripts/fetch-dict.ps1)
+dicts/

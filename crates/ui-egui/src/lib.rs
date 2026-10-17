@@ -9,11 +9,15 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod ai;
 mod cite;
 mod edits;
 mod files;
 mod fold;
 mod highlight;
+mod mathprev;
+mod mirrors;
+mod spellcheck;
 mod theme;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -87,11 +91,27 @@ struct TexPrefs {
     zoom: String,
     outline: bool,
     logs: bool,
+    /// Spell underlines (dictionary must exist under `dicts/`).
+    spellcheck: bool,
+    /// BYO AI endpoint + model. The token is deliberately NOT persisted
+    /// — it stays in-memory for the session.
+    ai_endpoint: String,
+    ai_model: String,
 }
 
 impl Default for TexPrefs {
     fn default() -> Self {
-        Self { dark: true, autocompile: false, engine: String::new(), zoom: "fit-width".into(), outline: true, logs: false }
+        Self {
+            dark: true,
+            autocompile: false,
+            engine: String::new(),
+            zoom: "fit-width".into(),
+            outline: true,
+            logs: false,
+            spellcheck: true,
+            ai_endpoint: String::new(),
+            ai_model: String::new(),
+        }
     }
 }
 
@@ -273,6 +293,27 @@ pub struct TexApp {
     hist_confirm: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
     hist_label: String,
+
+    /// Spell underlines (M5): dict-backed on native, inert on wasm.
+    spell: spellcheck::SpellCheck,
+    /// Bump on every buffer edit — gates `spell.scan` rescans.
+    src_stamp: u64,
+    /// Active occurrence mirrors (Ctrl+M): primary selection + ranges
+    /// that receive the same edit.
+    mirrors: Option<mirrors::Mirrors>,
+    /// Previous frame's buffer — mirror replication diffs it against
+    /// the post-edit text.
+    prev_src: String,
+    /// AI assist panel state (BYO provider; native does the network).
+    ai: ai::AiPanel,
+    /// Document-statistics window.
+    stats_open: bool,
+    /// Cached worker-compiled previews for the math under the caret.
+    mathprev: mathprev::MathPreview,
+    /// Print job result channel (submitted on a worker — `submit`
+    /// blocks on the spooler).
+    #[cfg(not(target_arch = "wasm32"))]
+    print_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
 }
 const AUTOCOMPILE_IDLE_SECS: f64 = 5.0;
 
@@ -334,6 +375,15 @@ impl TexApp {
             hist_confirm: None,
             #[cfg(not(target_arch = "wasm32"))]
             hist_label: String::new(),
+            spell: spellcheck::SpellCheck::load(),
+            src_stamp: 0,
+            mirrors: None,
+            prev_src: String::new(),
+            ai: ai::AiPanel::new(),
+            stats_open: false,
+            mathprev: mathprev::MathPreview::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            print_rx: None,
         };
         // Restore the non-theme prefs (theme applied above).
         let p = app.settings.get().clone();
@@ -341,6 +391,13 @@ impl TexApp {
         app.zoom = Zoom::from_pref(&p.zoom);
         app.outline_open = p.outline;
         app.show_logs = p.logs;
+        app.spell.set_enabled(p.spellcheck);
+        if !p.ai_endpoint.is_empty() {
+            app.ai.endpoint = p.ai_endpoint;
+        }
+        if !p.ai_model.is_empty() {
+            app.ai.model = p.ai_model;
+        }
         app.session = Session::with_source(DEFAULT_DOC.to_string());
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -357,6 +414,52 @@ impl TexApp {
     fn reparse(&mut self) {
         self.doc = self.session.structure();
         self.magic = texparse::parse_magic(self.session.source());
+    }
+
+    /// Send the last compiled PDF to the system printer on a worker —
+    /// `craft_print::submit` blocks in the spooler call.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn print_pdf(&mut self) {
+        if self.print_rx.is_some() {
+            self.status = "print already in flight…".into();
+            return;
+        }
+        let Some(pdf) = self.pdf_path.clone() else {
+            self.status = "compile first — no PDF to print".into();
+            return;
+        };
+        let title = pdf.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "texcraft".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let res = std::fs::read(&pdf)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| craft_print::submit(&bytes, &craft_print::Job { title, ..Default::default() }).map_err(|e| e.to_string()));
+            let _ = tx.send(res);
+        });
+        self.print_rx = Some(rx);
+        self.status = "printing…".into();
+    }
+
+    /// Drain a finished print job into the status line.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_print(&mut self) {
+        use std::sync::mpsc::TryRecvError::*;
+        let Some(rx) = &self.print_rx else { return };
+        match rx.try_recv() {
+            Ok(Ok(job)) => {
+                self.status = format!("sent to printer — {job}");
+                self.print_rx = None;
+            }
+            Ok(Err(e)) => {
+                self.status = format!("print failed: {e}");
+                self.print_rx = None;
+            }
+            Err(Empty) => {}
+            Err(Disconnected) => {
+                self.status = "print worker died".into();
+                self.print_rx = None;
+            }
+        }
     }
 
     fn open_path(&mut self, path: PathBuf) {
@@ -380,6 +483,9 @@ impl TexApp {
                 self.page_idx = 0;
                 self.flash = None;
                 self.folded.clear();
+                self.mirrors = None;
+                self.prev_src.clear();
+                self.src_stamp = self.src_stamp.wrapping_add(1);
                 self.rebuild_marks(); // report is gone — clear the dots
                 self.reparse();
                 self.load_tools();
@@ -583,7 +689,9 @@ impl TexApp {
         src.replace_range(start_b..end_b, &insertion);
         // Caret: inside the braces for arg-commands, otherwise at end.
         let caret = if !c.env && insertion.ends_with("{}") { start_b + insertion.len() - 1 } else { start_b + insertion.len() };
+        self.mirrors = None; // completion rewrites the buffer — mirrors die
         self.session.set_source(src);
+        self.src_stamp = self.src_stamp.wrapping_add(1);
         self.reparse();
         self.folded.clear();
         self.goto = Some(caret);
@@ -852,6 +960,16 @@ impl TexApp {
             return;
         }
         use egui::{Key, Modifiers};
+        // Ctrl+M: arm occurrence mirrors on the current selection; with
+        // mirrors live it clears them (Esc does too).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::M)) {
+            self.toggle_mirrors(ctx, editor_id);
+            return;
+        }
+        if self.mirrors.is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            self.mirrors = None;
+            return;
+        }
         // Most-specific modifiers first (matches_logically ignores
         // extras); distinct keys make the rest order-free.
         enum Op {
@@ -900,13 +1018,40 @@ impl TexApp {
         if src.as_str() == self.session.source() {
             return; // boundary no-op (e.g. move past the edge)
         }
+        self.mirrors = None; // line ops shift ranges — mirrors die
         self.session.set_source(src);
+        self.src_stamp = self.src_stamp.wrapping_add(1);
         self.last_edit = ctx.input(|i| i.time);
         self.reparse();
         self.folded.clear(); // any edit invalidates folds
         if let Some((l, c)) = caret {
             self.goto = Some(offset_of_line_col(self.session.source(), l + 1, c));
         }
+    }
+
+    /// Ctrl+M: select a word/phrase → every other occurrence becomes a
+    /// mirror site; typing at the primary replicates into all of them
+    /// (insert/delete replication happens in the editor change path).
+    fn toggle_mirrors(&mut self, ctx: &egui::Context, editor_id: egui::Id) {
+        if self.mirrors.take().is_some() {
+            self.status = "mirrors cleared".into();
+            return;
+        }
+        let src = self.session.source();
+        let Some(range) = egui::text_edit::TextEditState::load(ctx, editor_id).and_then(|st| st.cursor.char_range()) else { return };
+        let (lo, hi) = (range.primary.index.0.min(range.secondary.index.0), range.primary.index.0.max(range.secondary.index.0));
+        if lo == hi {
+            self.status = "select text first, then Ctrl+M".into();
+            return;
+        }
+        let needle: String = src.chars().skip(lo).take(hi - lo).collect();
+        let others: Vec<_> = mirrors::occurrences(src, &needle).into_iter().filter(|r| *r != (lo, hi)).collect();
+        if others.is_empty() {
+            self.status = "no other occurrences".into();
+            return;
+        }
+        self.status = format!("editing {} sites at once — Ctrl+M or Esc to stop", others.len() + 1);
+        self.mirrors = Some(mirrors::Mirrors { primary: (lo, hi), others });
     }
 
     /// 0-based line span of the current selection, or the caret line.
@@ -999,6 +1144,13 @@ impl TexApp {
                             self.load_snaps();
                             self.hist_confirm = None;
                         }
+                    }
+                    if ui.selectable_label(self.stats_open, "Stats").on_hover_text("word/character counts").clicked() {
+                        self.stats_open = !self.stats_open;
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.selectable_label(self.ai.open, "AI").on_hover_text("AI assist — bring your own endpoint").clicked() {
+                        self.ai.open = !self.ai.open;
                     }
                     if cite::cite_button(ui).clicked() {
                         self.open_cite(ui.ctx());
@@ -1206,6 +1358,11 @@ impl TexApp {
                     self.accept_completion(ui.ctx().input(|i| i.time));
                 }
             }
+            // Mirrors: snapshot the pre-edit buffer so a live edit can be
+            // diffed and replicated to the mirrored occurrences.
+            if self.mirrors.is_some() {
+                self.prev_src = src.clone();
+            }
             let mut layouter = |ui: &egui::Ui, s: &dyn egui::TextBuffer, w: f32| highlight::layout(ui, s, w);
             let avail = ui.available_size();
             let buf: &mut String = match folded_text.as_mut() {
@@ -1230,24 +1387,153 @@ impl TexApp {
             }
             let out = te.show(ui);
             if out.response.changed() && view.is_none() {
+                self.src_stamp = self.src_stamp.wrapping_add(1);
+                // Occurrence mirrors: replicate a single-point insert or
+                // delete into every mirror; anything more complex (paste,
+                // selection replace, undo) ends the mirror session.
+                if let Some(m) = self.mirrors.take() {
+                    if let Some((nsrc, nm)) = replicate_mirror_edit(&self.prev_src, &src, &m) {
+                        src = nsrc;
+                        self.mirrors = Some(nm);
+                    }
+                }
                 self.session.set_source(src.clone());
                 self.last_edit = ui.ctx().input(|i| i.time);
                 self.reparse();
                 self.folded.clear(); // any edit invalidates folds
             }
             self.paint_gutter(ui, &out, view.as_ref(), &regions);
+            if view.is_none() {
+                self.paint_spellcheck(ui, &out, &src);
+                self.paint_mirrors(ui, &out);
+                self.draw_math_preview(ui, &out, &src);
+            }
             let shown = folded_text.as_deref().unwrap_or(src.as_str());
             self.track_cursor(ui.ctx(), editor_id, shown, view.as_ref());
             if view.is_none() {
                 self.update_completion(&out, &src);
             }
             self.draw_completion(ui.ctx(), &out);
+            // Right-click on a misspelled word → suggestions menu.
+            if view.is_none() && self.spell.enabled() && self.spell.is_available() {
+                let mut replace: Option<(usize, usize, String)> = None;
+                out.response.context_menu(|ui| {
+                    let ci =
+                        ui.ctx().input(|i| i.pointer.interact_pos()).map(|p| out.galley.cursor_from_pos(p - out.galley_pos).index.0).unwrap_or(0);
+                    if let Some(&(s, e)) = self.spell.scan(&src, self.src_stamp).iter().find(|(s, e)| ci >= *s && ci <= *e) {
+                        for sug in self.spell.suggest(&src, s, e) {
+                            if ui.button(&sug).clicked() {
+                                replace = Some((s, e, sug.clone()));
+                                ui.close();
+                            }
+                        }
+                        if replace.is_none() && self.spell.suggest(&src, s, e).is_empty() {
+                            ui.weak("(no suggestions)");
+                        }
+                        ui.separator();
+                    }
+                    let label = if self.spell.enabled() { "spell check: on" } else { "spell check: off" };
+                    if ui.button(label).clicked() {
+                        self.spell.set_enabled(!self.spell.enabled());
+                        ui.close();
+                    }
+                });
+                if let Some((s, e, sug)) = replace {
+                    let mut buf = self.session.source().to_string();
+                    let (bs, be) = (byte_of_char(&buf, s), byte_of_char(&buf, e));
+                    buf.replace_range(bs..be, &sug);
+                    self.mirrors = None;
+                    self.session.set_source(buf);
+                    self.src_stamp = self.src_stamp.wrapping_add(1);
+                    self.last_edit = ui.ctx().input(|i| i.time);
+                    self.reparse();
+                }
+            }
             #[cfg(not(target_arch = "wasm32"))]
             if out.response.clicked() && ui.ctx().input(|i| i.modifiers.command) {
                 let now = ui.ctx().input(|i| i.time);
                 self.forward_sync(now);
             }
         });
+    }
+
+    /// Wavy red underlines for misspelled ranges — TeXstudio-style
+    /// squiggles mapped through the live galley (only when unfolded;
+    /// fold-derived view text would mis-map the char indices).
+    fn paint_spellcheck(&mut self, ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, src: &str) {
+        if !self.spell.enabled() || !self.spell.is_available() {
+            return;
+        }
+        let ranges = self.spell.scan(src, self.src_stamp);
+        if ranges.is_empty() {
+            return;
+        }
+        let clip = out.response.rect;
+        let painter = ui.painter().with_clip_rect(clip);
+        let color = theme::pal().error;
+        // Char-index → row: glyphs are per-char; a soft-wrap row
+        // contributes `glyphs.len()`, a hard break adds the `\n` too.
+        let mut row_start = 0usize;
+        for placed in &out.galley.rows {
+            let row_len = placed.row.glyphs.len();
+            let row_end = row_start + row_len;
+            for &(s, e) in ranges {
+                if e <= row_start || s >= row_end {
+                    continue;
+                }
+                let lo = s.max(row_start) - row_start;
+                let hi = e.min(row_end) - row_start;
+                let (Some(g0), Some(g1)) = (placed.row.glyphs.get(lo), placed.row.glyphs.get(hi.saturating_sub(1))) else { continue };
+                let x0 = out.galley_pos.x + placed.pos.x + g0.pos.x;
+                let x1 = out.galley_pos.x + placed.pos.x + g1.pos.x + g1.advance_width;
+                let y = out.galley_pos.y + placed.pos.y + placed.row.size.y - 2.0;
+                if y < clip.top() || y > clip.bottom() {
+                    continue;
+                }
+                let mut pts = Vec::with_capacity(((x1 - x0) / 2.5) as usize + 2);
+                let mut x = x0;
+                let mut up = false;
+                while x < x1 {
+                    pts.push(egui::pos2(x, y - if up { 0.0 } else { 1.6 }));
+                    x += 2.5;
+                    up = !up;
+                }
+                pts.push(egui::pos2(x1, y - 0.8));
+                painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, color)));
+            }
+            row_start = row_end + usize::from(placed.ends_with_newline);
+        }
+    }
+
+    /// Tinted boxes behind mirror ranges + the primary — the visible
+    /// "your edit lands in N places" cue.
+    fn paint_mirrors(&self, ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput) {
+        let Some(m) = &self.mirrors else { return };
+        let painter = ui.painter().with_clip_rect(out.response.rect);
+        let fill = theme::pal().accent.gamma_multiply(0.18);
+        let edge = theme::pal().accent;
+        for &(s, e) in std::iter::once(&m.primary).chain(m.others.iter()) {
+            let mut row_start = 0usize;
+            for placed in &out.galley.rows {
+                let row_len = placed.row.glyphs.len();
+                let row_end = row_start + row_len;
+                if e > row_start && s < row_end {
+                    let lo = s.max(row_start) - row_start;
+                    let hi = e.min(row_end) - row_start;
+                    if let (Some(g0), Some(g1)) = (placed.row.glyphs.get(lo), placed.row.glyphs.get(hi.saturating_sub(1))) {
+                        let r = egui::Rect::from_min_max(
+                            egui::pos2(out.galley_pos.x + placed.pos.x + g0.pos.x, out.galley_pos.y + placed.pos.y),
+                            egui::pos2(
+                                out.galley_pos.x + placed.pos.x + g1.pos.x + g1.advance_width,
+                                out.galley_pos.y + placed.pos.y + placed.row.size.y,
+                            ),
+                        );
+                        painter.rect(r, 1.0, fill, egui::Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+                    }
+                }
+                row_start = row_end + usize::from(placed.ends_with_newline);
+            }
+        }
     }
 
     /// Line-number gutter + fold markers + issue dots + active-line
@@ -1426,6 +1712,14 @@ impl TexApp {
                                 ui.selectable_value(&mut self.zoom, Zoom::FitWidth, "fit width");
                                 ui.selectable_value(&mut self.zoom, Zoom::FitPage, "fit page");
                             });
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if ui
+                            .add_enabled(self.pdf_path.is_some() && self.print_rx.is_none(), egui::Button::new("🖨").small())
+                            .on_hover_text("print the PDF")
+                            .clicked()
+                        {
+                            self.print_pdf();
+                        }
                     });
                 });
                 ui.separator();
@@ -1589,7 +1883,9 @@ impl TexApp {
         let caret_b = byte_of_char(&src, caret_ci);
         let ins = cite::insert_text(&src, caret_b, key);
         src.insert_str(caret_b, &ins);
+        self.mirrors = None;
         self.session.set_source(src);
+        self.src_stamp = self.src_stamp.wrapping_add(1);
         self.reparse();
         self.folded.clear(); // any edit invalidates folds
         self.goto = Some(caret_b + ins.len());
@@ -1808,6 +2104,167 @@ impl TexApp {
             self.hist_open = false;
         }
     }
+
+    /// Window: document statistics — `texparse::analyze` on the live
+    /// buffer (lexer-based; comments and commands don't count as words).
+    fn stats_modal(&mut self, ctx: &egui::Context) {
+        if !self.stats_open {
+            return;
+        }
+        let s = texparse::analyze(self.session.source());
+        egui::Window::new("Statistics")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut self.stats_open)
+            .show(ctx, |ui| {
+                egui::Grid::new("stats_grid").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                    for (label, v) in [
+                        ("words", s.words),
+                        ("characters", s.chars),
+                        ("chars (no spaces)", s.chars_no_space),
+                        ("lines", s.lines),
+                        ("commands", s.commands),
+                        ("inline math", s.math_inline),
+                        ("display math", s.math_display),
+                        ("environments", s.envs),
+                        ("sections", s.sections),
+                        ("labels", s.labels),
+                        ("citations", s.cites),
+                    ] {
+                        ui.label(egui::RichText::new(label).size(11.5).color(theme::pal().muted));
+                        ui.label(egui::RichText::new(format!("{v}")).size(11.5).monospace());
+                        ui.end_row();
+                    }
+                });
+            });
+    }
+
+    /// Window: BYO-provider AI assist — endpoint/model fields, test +
+    /// ask buttons, response area. Token stays session-only (never
+    /// persisted). Worker replies drain through `AiPanel::poll`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn ai_modal(&mut self, ctx: &egui::Context) {
+        if !self.ai.open {
+            return;
+        }
+        let mut open = self.ai.open;
+        let mut ask = false;
+        let mut probe = false;
+        egui::Window::new("AI assist")
+            .collapsible(false)
+            .resizable(true)
+            .default_size([420.0, 340.0])
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::Grid::new("ai_cfg").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+                    ui.label(egui::RichText::new("endpoint").size(11.0).color(theme::pal().muted));
+                    ui.add(egui::TextEdit::singleline(&mut self.ai.endpoint).hint_text("http://localhost:11434/v1").desired_width(300.0));
+                    ui.end_row();
+                    ui.label(egui::RichText::new("model").size(11.0).color(theme::pal().muted));
+                    ui.add(egui::TextEdit::singleline(&mut self.ai.model).hint_text("llama3.2, gpt-4o-mini, …").desired_width(300.0));
+                    ui.end_row();
+                    ui.label(egui::RichText::new("token").size(11.0).color(theme::pal().muted));
+                    ui.add(egui::TextEdit::singleline(&mut self.ai.token).password(true).hint_text("optional — not saved").desired_width(300.0));
+                    ui.end_row();
+                });
+                ui.horizontal(|ui| {
+                    probe = ui.button("test connection").clicked();
+                    if let Some((ok, label)) = &self.ai.status {
+                        ui.label(egui::RichText::new(label).size(10.5).color(if *ok { theme::pal().accent_dim } else { theme::pal().error }));
+                    }
+                });
+                ui.separator();
+                ui.label(egui::RichText::new("question (current document is sent as context)").size(10.5).color(theme::pal().muted));
+                egui::ScrollArea::vertical().id_salt("ai_prompt").max_height(90.0).show(ui, |ui| {
+                    ui.add(egui::TextEdit::multiline(&mut self.ai.prompt).desired_width(f32::INFINITY).desired_rows(3));
+                });
+                ui.horizontal(|ui| {
+                    ask = ui.add_enabled(!self.ai.busy && !self.ai.prompt.trim().is_empty(), egui::Button::new("ask")).clicked();
+                    if self.ai.busy {
+                        ui.spinner();
+                    }
+                });
+                if !self.ai.response.is_empty() {
+                    ui.separator();
+                    egui::ScrollArea::vertical().id_salt("ai_resp").show(ui, |ui| {
+                        ui.label(egui::RichText::new(&self.ai.response).size(11.0));
+                    });
+                }
+            });
+        self.ai.open = open;
+        if probe {
+            self.ai.probe();
+        }
+        if ask {
+            self.ai.ask(self.session.source());
+        }
+    }
+
+    /// Floating math preview: when the caret sits inside a math span,
+    /// tint the span, compile the fragment on a worker, and paint the
+    /// result in an egui::Area anchored bottom-right of the editor.
+    fn draw_math_preview(&mut self, ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, src: &str) {
+        let Some(editor_id) = self.editor_id else { return };
+        let ci = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).and_then(|st| st.cursor.char_range()).map(|r| r.primary.index.0);
+        let Some(ci) = ci else { return };
+        let Some(latex) = mathprev::math_at(src, ci) else { return };
+        self.mathprev.request(&latex);
+        // Faint tint behind the previewed span — the "this is what's
+        // being rendered" cue. `math_span` is byte offsets; galley rows
+        // count chars, so convert through the char cursor.
+        if let Some((bs, be)) = mathprev::math_span(src, ci) {
+            let (cs, ce) =
+                (src.get(..bs).map(str::chars).map(Iterator::count).unwrap_or(0), src.get(..be).map(str::chars).map(Iterator::count).unwrap_or(0));
+            let painter = ui.painter().with_clip_rect(out.response.rect);
+            let fill = theme::pal().accent.gamma_multiply(0.10);
+            let mut row_start = 0usize;
+            for placed in &out.galley.rows {
+                let row_end = row_start + placed.row.glyphs.len();
+                if ce > row_start && cs < row_end {
+                    let lo = cs.max(row_start) - row_start;
+                    let hi = ce.min(row_end) - row_start;
+                    if let (Some(g0), Some(g1)) = (placed.row.glyphs.get(lo), placed.row.glyphs.get(hi.saturating_sub(1))) {
+                        let r = egui::Rect::from_min_max(
+                            egui::pos2(out.galley_pos.x + placed.pos.x + g0.pos.x, out.galley_pos.y + placed.pos.y),
+                            egui::pos2(
+                                out.galley_pos.x + placed.pos.x + g1.pos.x + g1.advance_width,
+                                out.galley_pos.y + placed.pos.y + placed.row.size.y,
+                            ),
+                        );
+                        painter.rect_filled(r, 2.0, fill);
+                    }
+                }
+                row_start = row_end + usize::from(placed.ends_with_newline);
+            }
+        }
+        egui::Area::new(egui::Id::new("math_preview"))
+            .order(egui::Order::Foreground)
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .fixed_pos(ui.max_rect().right_bottom() - egui::vec2(12.0, 12.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::new()
+                    .fill(theme::pal().top_bg)
+                    .stroke(egui::Stroke::new(1.0, theme::pal().border))
+                    .corner_radius(6.0)
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new(format!("${latex}$")).size(10.0).color(theme::pal().muted).monospace());
+                        if let Some(tex) = self.mathprev.texture(&latex) {
+                            let size = tex.size_vec2();
+                            ui.image((tex.id(), size));
+                        } else if let Some(err) = self.mathprev.error(&latex) {
+                            ui.label(egui::RichText::new(err).size(10.0).color(theme::pal().error));
+                        } else {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(egui::RichText::new("rendering…").size(10.0).color(theme::pal().muted));
+                            });
+                        }
+                    });
+            });
+    }
 }
 
 /// F12 → capture the window to `texcraft-shot.png` in the cwd (this is
@@ -1858,6 +2315,33 @@ fn handle_screenshot(_ctx: &egui::Context) {}
 /// Byte offset of the `ci`-th char in `src` (clamped to `src.len()`).
 fn byte_of_char(src: &str, ci: usize) -> usize {
     src.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(src.len())
+}
+
+/// Diff `prev`→`cur` as a single-point insert or delete at the primary
+/// caret and replicate it into every mirror — returns the replicated
+/// source plus the adjusted ranges, or `None` when the edit isn't a
+/// pure point edit (selection-replace, multi-cursor paste, undo…).
+/// The caller drops the mirrors in that case.
+fn replicate_mirror_edit(prev: &str, cur: &str, m: &mirrors::Mirrors) -> Option<(String, mirrors::Mirrors)> {
+    let a: Vec<char> = prev.chars().collect();
+    let b: Vec<char> = cur.chars().collect();
+    let mut pre = 0usize;
+    while pre < a.len().min(b.len()) && a[pre] == b[pre] {
+        pre += 1;
+    }
+    let mut suf = 0usize;
+    while suf < a.len().min(b.len()).saturating_sub(pre) && a[a.len() - 1 - suf] == b[b.len() - 1 - suf] {
+        suf += 1;
+    }
+    let deleted = a.len() - pre - suf;
+    let inserted: String = b[pre..b.len() - suf].iter().collect();
+    if deleted == 0 && !inserted.is_empty() {
+        Some(mirrors::insert_replicated(prev, m, pre, &inserted))
+    } else if inserted.is_empty() && deleted > 0 {
+        Some(mirrors::delete_replicated(prev, m, pre + deleted, deleted))
+    } else {
+        None
+    }
 }
 
 /// Char index of (1-based `line`, 1-based char `col`) in `src` — the
@@ -2059,16 +2543,21 @@ impl eframe::App for TexApp {
         {
             self.poll_compile(ctx);
             self.poll_tool(ctx);
+            self.poll_print();
             self.tick_autocompile(ctx);
             // Write prefs when the debounce has passed — wasm's store is
             // memory-only and Instant isn't readable there anyway.
             self.settings.tick(std::time::Instant::now());
         }
         self.refresh_tree(ctx);
+        self.mathprev.poll(ctx);
+        self.ai.poll();
         // Mirror UI state into prefs each frame — `update` no-ops when
         // nothing changed; `tick` writes the file after its debounce.
         let engine = self.engine_sel.and_then(|i| self.engines.get(i).cloned()).unwrap_or_default();
-        let (dark, auto, zoom, outline, logs) = (theme::is_dark(), self.autocompile, self.zoom.pref(), self.outline_open, self.show_logs);
+        let (dark, auto, zoom, outline, logs, spell) =
+            (theme::is_dark(), self.autocompile, self.zoom.pref(), self.outline_open, self.show_logs, self.spell.enabled());
+        let (ai_ep, ai_model) = (self.ai.endpoint.clone(), self.ai.model.clone());
         self.settings.update(|p| {
             p.dark = dark;
             p.autocompile = auto;
@@ -2076,6 +2565,9 @@ impl eframe::App for TexApp {
             p.zoom = zoom.clone();
             p.outline = outline;
             p.logs = logs;
+            p.spellcheck = spell;
+            p.ai_endpoint = ai_ep.clone();
+            p.ai_model = ai_model.clone();
         });
         craft_quit::on_close_request(ctx);
     }
@@ -2102,10 +2594,12 @@ impl eframe::App for TexApp {
         self.status_bar(ui);
         self.editor_pane(ui);
         self.new_entry_modal(&ctx);
+        self.stats_modal(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.tpl_modal(&ctx);
             self.hist_modal(&ctx);
+            self.ai_modal(&ctx);
         }
         if let Some(key) = self.cite.show(&ctx, theme::pal()) {
             let now = ctx.input(|i| i.time);

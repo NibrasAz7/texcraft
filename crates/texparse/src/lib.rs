@@ -21,6 +21,10 @@
 //!   (`\input`, `\include`, graphics, bibliography, class, packages),
 //!   on-disk resolution, and a cycle-safe BFS from an entry file into
 //!   roots, reachable sources, resources and missing references.
+//! - [`stats`](analyze) — document statistics for the "Analyse Text"
+//!   panel and the `text.stats` command: `wc`-convention word counts,
+//!   char/line tallies, math spans, environments, headings, labels and
+//!   citations — one O(n) pass over the token stream.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
@@ -29,12 +33,14 @@ mod bib;
 pub mod graph;
 mod lex;
 mod magic;
+mod stats;
 mod structure;
 
 pub use bib::{parse_bib, BibEntry, BibFile};
 pub use graph::{build, declares_document_class, extract_deps, resolve, Dep, DepKind, ProjectGraph};
 pub use lex::{lex, Pos, Tok, Token};
 pub use magic::{parse as parse_magic, Magic};
+pub use stats::{analyze, DocStats};
 pub use structure::{parse_structure, DocStructure, Env, Heading, Issue};
 
 /// Hard caps so hostile input can't exhaust memory or stack.

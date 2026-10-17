@@ -25,3 +25,7 @@ unsafe_code = "forbid"
 craft-atomic = { git = "https://github.com/storytold/craft-libs", rev = "457a078809690994b22debdffb703ff36d3129df" }
 craft-quit = { git = "https://github.com/storytold/craft-libs", rev = "457a078809690994b22debdffb703ff36d3129df", features = ["egui"] }
 craft-settings = { git = "https://github.com/storytold/craft-libs", rev = "457a078809690994b22debdffb703ff36d3129df" }
+# Same pins as pdfcraft: print from storytold; ai from the feat/craft-ai
+# fork branch until that PR lands upstream.
+craft-print = { git = "https://github.com/storytold/craft-libs", rev = "d991bf6792f8ade99c51358bf3c1d902c8cd96b5" }
+craft-ai = { git = "https://github.com/NibrasAz7/craft-libs", rev = "e8ffa6fc8c4463c364ff08b415e03574602effbb" }
