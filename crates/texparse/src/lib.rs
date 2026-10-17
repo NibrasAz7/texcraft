@@ -17,16 +17,22 @@
 //!   (`% !TeX program = xelatex`, `% !BIB program = biber`): build-engine,
 //!   root, encoding, spellcheck and jobname hints read from the leading
 //!   comment block the way TeXstudio/TeXShop honor them.
+//! - [`graph`] — project graph: file-level dependency extraction
+//!   (`\input`, `\include`, graphics, bibliography, class, packages),
+//!   on-disk resolution, and a cycle-safe BFS from an entry file into
+//!   roots, reachable sources, resources and missing references.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod bib;
+pub mod graph;
 mod lex;
 mod magic;
 mod structure;
 
 pub use bib::{parse_bib, BibEntry, BibFile};
+pub use graph::{build, declares_document_class, extract_deps, resolve, Dep, DepKind, ProjectGraph};
 pub use lex::{lex, Pos, Tok, Token};
 pub use magic::{parse as parse_magic, Magic};
 pub use structure::{parse_structure, DocStructure, Env, Heading, Issue};

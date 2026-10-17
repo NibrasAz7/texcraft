@@ -84,3 +84,18 @@ widget) are tracked there — nothing in M0 depends on them.
     Ctrl+//Ctrl+Shift+K/Ctrl+Shift+Bksp; compile errors→gutter dots+
     tooltips; completion popup (\cmd ≥2 chars, \begin/\end envs, ↑↓
     Enter/Tab Esc); magic directives in status bar.
+- M4 Wave-2 — document workflow features (parallel streams again):
+  * texparse `graph.rs` — file-level deps via the lexer (\input,
+    \include, graphics, bib, class, packages), extension-aware
+    resolution, cycle-safe BFS `build`, root detection; engine
+    `project.graph` exposes it.
+  * engine `templates.rs` + `history.rs` — `template.list/read/new`
+    over a shipped `templates/` dir (article, report, letter, beamer,
+    arabdoc polyglossia+xelatex); `project.snapshot` local history
+    (`.texcraft/snapshots/<ts>/`, atomic restore, confirm-gated).
+  * ui-egui `cite.rs` — insert-cite dialog (Ctrl+Shift+C / cite
+    button): project .bib scan via parse_bib, filter+keyboard nav,
+    merges into existing `\cite{…}`; template picker in the tree
+    toolbar; History window (snapshot now / two-click restore);
+    craft-settings persistence — theme, autocompile, engine, zoom,
+    panel visibility survive restarts (memory-stub on wasm).

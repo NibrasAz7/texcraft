@@ -1,0 +1,352 @@
+//! Insert-citation dialog (TeXstudio parity): a modal picker over the
+//! project's `.bib` files. `Ctrl+Shift+C` or the top-bar book button
+//! opens it; the picked key lands as `\cite{key}` at the caret — or as
+//! `key,` when the caret already sits inside a `\cite{…}` argument,
+//! merging into a multi-key cite.
+//!
+//! Scanning is shallow and bounded (`root` plus one subdirectory level,
+//! [`MAX_FILES`] files, [`MAX_BYTES`] each) — the project dir is
+//! untrusted input. The web build can't read the folder: the dialog
+//! still opens and explains itself when the list is empty.
+
+use std::path::Path;
+
+use crate::theme;
+
+/// One bibliography row: a `@…{key, …}` entry and the file it came from.
+pub struct CiteEntry {
+    pub key: String,
+    pub author: String,
+    pub title: String,
+    pub year: String,
+    pub file: String,
+}
+
+/// Scan caps — the project dir is untrusted input.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_FILES: usize = 32;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_BYTES: u64 = 512 * 1024;
+
+/// Rows rendered at once — the list stays interactive on huge
+/// bibliographies; the filter narrows the rest.
+const MAX_ROWS: usize = 200;
+
+/// The picker's state; the window is visible while `open` is set.
+#[derive(Default)]
+pub struct CiteDialog {
+    open: bool,
+    filter: String,
+    /// Selected row within the *filtered* list.
+    sel: usize,
+    entries: Vec<CiteEntry>,
+    /// Per-file parse notes: `(file name, issue count)`.
+    issues: Vec<(String, usize)>,
+    /// Editor caret (char index) captured when the dialog opened — the
+    /// filter steals focus, so insertion lands where the user was.
+    pub saved_caret: Option<usize>,
+}
+
+impl CiteDialog {
+    /// Raise the dialog and (re)load entries from `root`'s `.bib` files.
+    pub fn open(&mut self, root: &Path) {
+        self.open = true;
+        self.filter.clear();
+        self.sel = 0;
+        self.entries.clear();
+        self.issues.clear();
+        self.scan(root);
+    }
+
+    /// Whether the dialog is currently up.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// `.bib` files in `root` and its immediate subdirectories.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn scan(&mut self, root: &Path) {
+        use std::io::Read;
+        // Candidate dirs: root plus one subdirectory level.
+        let mut dirs = vec![root.to_path_buf()];
+        if let Ok(read) = std::fs::read_dir(root) {
+            let mut subs: Vec<std::path::PathBuf> =
+                read.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')).map(|e| e.path()).filter(|p| p.is_dir()).collect();
+            subs.sort();
+            dirs.extend(subs);
+        }
+        let mut bibs = Vec::new();
+        for d in &dirs {
+            let Ok(read) = std::fs::read_dir(d) else { continue };
+            for e in read.flatten() {
+                if e.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("bib")) {
+                    bibs.push(p);
+                }
+            }
+        }
+        bibs.sort();
+        bibs.truncate(MAX_FILES);
+        for p in bibs {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string());
+            let mut text = String::new();
+            let Ok(f) = std::fs::File::open(&p) else { continue };
+            if f.take(MAX_BYTES).read_to_string(&mut text).is_err() {
+                continue;
+            }
+            let bib = texparse::parse_bib(&text);
+            if !bib.issues.is_empty() {
+                self.issues.push((name.clone(), bib.issues.len()));
+            }
+            for e in &bib.entries {
+                self.entries.push(CiteEntry {
+                    key: e.key.clone(),
+                    author: tidy(e.field("author").unwrap_or("")),
+                    title: tidy(e.field("title").unwrap_or("")),
+                    year: tidy(e.field("year").unwrap_or("")),
+                    file: name.clone(),
+                });
+            }
+        }
+    }
+
+    /// The web build can't read the project folder — `open` still raises
+    /// the dialog, which shows the empty-state hint.
+    #[cfg(target_arch = "wasm32")]
+    fn scan(&mut self, _root: &Path) {}
+
+    /// Draw the window; returns the picked key (dialog closes on pick,
+    /// Esc or the ✕ button).
+    pub fn show(&mut self, ctx: &egui::Context, pal: theme::Palette) -> Option<String> {
+        if !self.open {
+            return None;
+        }
+        let mut open = self.open;
+        let mut close = false;
+        let mut picked: Option<String> = None;
+        egui::Window::new("cite").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).open(&mut open).show(
+            ctx,
+            |ui| {
+                // Arrows/Enter/Escape are consumed before the filter
+                // TextEdit runs — typed text still reaches it.
+                let mut nav = false;
+                let mut want_pick = false;
+                ctx.input_mut(|i| {
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        self.sel = self.sel.saturating_add(1);
+                        nav = true;
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        self.sel = self.sel.saturating_sub(1);
+                        nav = true;
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                        want_pick = true;
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                        close = true;
+                    }
+                });
+
+                // Per-file parse notes, kept subtle — entries still list.
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("{} entries", self.entries.len())).size(9.5).color(pal.faint));
+                    for (f, n) in self.issues.iter().take(3) {
+                        ui.label(egui::RichText::new(format!("{f}: {n} issue(s)")).size(9.5).color(pal.muted));
+                    }
+                });
+                let edit = ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("filter by key, author, title…").desired_width(400.0));
+                ui.memory_mut(|m| m.request_focus(edit.id));
+                if edit.changed() {
+                    self.sel = 0;
+                }
+
+                // Case-insensitive substring over key + title + author.
+                let needle = self.filter.to_lowercase();
+                let mut matches: Vec<usize> = Vec::new();
+                for (i, e) in self.entries.iter().enumerate() {
+                    if needle.is_empty()
+                        || e.key.to_lowercase().contains(&needle)
+                        || e.title.to_lowercase().contains(&needle)
+                        || e.author.to_lowercase().contains(&needle)
+                    {
+                        matches.push(i);
+                    }
+                }
+                self.sel = self.sel.min(matches.len().saturating_sub(1));
+                if want_pick {
+                    picked = matches.get(self.sel).and_then(|&i| self.entries.get(i)).map(|e| e.key.clone());
+                }
+
+                egui::ScrollArea::vertical().id_salt("cite-list").max_height(300.0).auto_shrink([false, false]).show(ui, |ui| {
+                    ui.set_min_width(400.0);
+                    if self.entries.is_empty() {
+                        let msg = if cfg!(target_arch = "wasm32") {
+                            "bibliography scanning needs a local file"
+                        } else {
+                            "no .bib files found — save a refs.bib next to the document"
+                        };
+                        ui.label(egui::RichText::new(msg).size(11.0).color(pal.muted));
+                        return;
+                    }
+                    if matches.is_empty() {
+                        ui.label(egui::RichText::new("(no matches)").size(11.0).color(pal.muted));
+                    }
+                    for (row, &ei) in matches.iter().take(MAX_ROWS).enumerate() {
+                        let Some(e) = self.entries.get(ei) else { continue };
+                        let mut detail = e.author.clone();
+                        if !e.title.is_empty() {
+                            if !detail.is_empty() {
+                                detail.push_str(", ");
+                            }
+                            detail.push_str(&e.title);
+                        }
+                        if !e.year.is_empty() {
+                            if !detail.is_empty() {
+                                detail.push(' ');
+                            }
+                            detail.push_str(&format!("({})", e.year));
+                        }
+                        let label = if detail.is_empty() { e.key.clone() } else { format!("{} — {detail}", e.key) };
+                        let resp = ui.selectable_label(row == self.sel, egui::RichText::new(label).size(11.5)).on_hover_text(&e.file);
+                        if nav && row == self.sel {
+                            resp.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        if resp.clicked() {
+                            picked = Some(e.key.clone());
+                        }
+                    }
+                    if matches.len() > MAX_ROWS {
+                        ui.label(egui::RichText::new(format!("… {} more — keep typing", matches.len() - MAX_ROWS)).size(10.0).color(pal.faint));
+                    }
+                });
+            },
+        );
+        self.open = open && !close && picked.is_none();
+        picked
+    }
+}
+
+/// The top-bar "cite" button: a tiny open-book glyph plus the label.
+pub fn cite_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(44.0, 20.0), egui::Sense::click());
+    let resp = resp.on_hover_text("insert citation — Ctrl+Shift+C");
+    let p = ui.painter();
+    let ink = if resp.hovered() { theme::pal().text } else { theme::pal().muted };
+    let cy = rect.center().y;
+    let bx = rect.left() + 3.0;
+    let stroke = egui::Stroke::new(1.0, ink);
+    // Open book: two page outlines sharing a spine.
+    let left = egui::Rect::from_min_max(egui::pos2(bx, cy - 4.0), egui::pos2(bx + 5.0, cy + 4.0));
+    let right = egui::Rect::from_min_max(egui::pos2(bx + 6.0, cy - 4.0), egui::pos2(bx + 11.0, cy + 4.0));
+    p.rect_stroke(left, 1.0, stroke, egui::StrokeKind::Inside);
+    p.rect_stroke(right, 1.0, stroke, egui::StrokeKind::Inside);
+    p.text(egui::pos2(bx + 15.0, cy), egui::Align2::LEFT_CENTER, "cite", egui::FontId::proportional(11.5), ink);
+    resp
+}
+
+/// What to insert at byte offset `caret` for `key`: `\cite{key}` at a
+/// fresh spot, or `key,` when `caret` already sits inside a `\…cite{…}`
+/// argument — merging into a multi-key cite, comma seeding the next
+/// key slot.
+pub fn insert_text(src: &str, caret: usize, key: &str) -> String {
+    if inside_cite_args(src, caret) {
+        format!("{key},")
+    } else {
+        format!("\\cite{{{key}}}")
+    }
+}
+
+/// Whether `caret` (a byte offset, clamped to a boundary) sits inside
+/// the braces of a `\cite`-family argument: the nearest preceding brace
+/// is a `{` whose command name starts or ends with `cite` (`\cite`,
+/// `\citet`, `\parencite`, …). A `}` first means a group closed between
+/// the brace and the caret — we're outside.
+fn inside_cite_args(src: &str, caret: usize) -> bool {
+    let mut end = caret.min(src.len());
+    while end > 0 && !src.is_char_boundary(end) {
+        end -= 1;
+    }
+    let Some(back) = src.get(..end) else { return false };
+    // Bound the look-back — a cite's braces never span far.
+    let start = back.char_indices().nth(back.chars().count().saturating_sub(256)).map(|(b, _)| b).unwrap_or(0);
+    let Some(tail) = back.get(start..) else { return false };
+    let bytes = tail.as_bytes();
+    for i in (0..bytes.len()).rev() {
+        match bytes[i] {
+            b'}' => return false,
+            b'{' => {
+                let Some(before) = tail.get(..i) else { return false };
+                let name: String = before.chars().rev().take_while(|c| c.is_ascii_alphabetic()).collect::<Vec<_>>().into_iter().rev().collect();
+                let Some(prefix) = before.get(..before.len() - name.len()) else { return false };
+                if !prefix.ends_with('\\') {
+                    return false;
+                }
+                let lc = name.to_ascii_lowercase();
+                return lc.starts_with("cite") || lc.ends_with("cite");
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Collapse whitespace runs — `.bib` values can span lines.
+#[cfg(not(target_arch = "wasm32"))]
+fn tidy(v: &str) -> String {
+    v.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at_end(src: &str, key: &str) -> String {
+        insert_text(src, src.len(), key)
+    }
+
+    // ---------- insert_text ----------
+
+    #[test]
+    fn fresh_spot_inserts_cite_command() {
+        assert_eq!(at_end("see ", "knuth84"), "\\cite{knuth84}");
+        assert_eq!(insert_text("", 0, "k"), "\\cite{k}");
+    }
+
+    #[test]
+    fn inside_cite_merges_with_comma() {
+        assert_eq!(at_end("\\cite{", "b"), "b,");
+        assert_eq!(at_end("\\cite{one,", "b"), "b,");
+        assert_eq!(at_end("\\cite{one", "b"), "b,");
+        assert_eq!(at_end("\\citet{a", "b"), "b,");
+        assert_eq!(at_end("\\parencite{a", "b"), "b,");
+        assert_eq!(at_end("\\Cite{a", "b"), "b,");
+    }
+
+    #[test]
+    fn outside_cite_stays_fresh() {
+        // Closed braces between the '{' and the caret → outside.
+        assert_eq!(at_end("\\cite{a} and ", "b"), "\\cite{b}");
+        assert_eq!(at_end("\\cite{a}", "b"), "\\cite{b}");
+        // A brace that isn't a cite command.
+        assert_eq!(at_end("\\section{t", "b"), "\\cite{b}");
+        assert_eq!(at_end("text {", "b"), "\\cite{b}");
+        // Nested brace inside a cite: the inner '{' isn't a command.
+        assert_eq!(at_end("\\cite{a{b}c", "d"), "\\cite{d}");
+        // Escaped brace isn't a group open.
+        assert_eq!(at_end("\\{", "b"), "\\cite{b}");
+    }
+
+    #[test]
+    fn caret_mid_argument_and_boundaries() {
+        // Caret between keys inside the braces.
+        assert_eq!(insert_text("\\cite{a,b}", 7, "c"), "c,");
+        // Non-boundary caret clamps instead of panicking.
+        assert_eq!(insert_text("α", 1, "k"), "\\cite{k}");
+        // Unicode before the caret doesn't confuse the look-back.
+        assert_eq!(insert_text("αβ \\cite{x", "αβ \\cite{x".len(), "k"), "k,");
+    }
+}

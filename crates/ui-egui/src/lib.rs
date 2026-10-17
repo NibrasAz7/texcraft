@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod cite;
 mod edits;
 mod files;
 mod fold;
@@ -52,6 +53,95 @@ enum Zoom {
     FitWidth,
     FitPage,
     Pct(f32),
+}
+
+impl Zoom {
+    /// Stable string form for `TexPrefs::zoom`.
+    fn pref(&self) -> String {
+        match self {
+            Zoom::FitWidth => "fit-width".into(),
+            Zoom::FitPage => "fit-page".into(),
+            Zoom::Pct(p) => format!("{}", p.round() as i32),
+        }
+    }
+
+    /// Parse `TexPrefs::zoom`; unknown values fall back to fit-width.
+    fn from_pref(s: &str) -> Zoom {
+        match s {
+            "fit-page" => Zoom::FitPage,
+            "fit-width" => Zoom::FitWidth,
+            other => other.parse::<f32>().ok().map(|p| Zoom::Pct(p.clamp(25.0, 400.0))).unwrap_or(Zoom::FitWidth),
+        }
+    }
+}
+
+/// Persisted preferences (craft-settings `config.toml`): theme, preview
+/// zoom, panel visibility, engine choice (by name — the discovered list
+/// order isn't stable), and the auto-compile toggle.
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
+#[serde(default)]
+struct TexPrefs {
+    dark: bool,
+    autocompile: bool,
+    engine: String,
+    zoom: String,
+    outline: bool,
+    logs: bool,
+}
+
+impl Default for TexPrefs {
+    fn default() -> Self {
+        Self { dark: true, autocompile: false, engine: String::new(), zoom: "fit-width".into(), outline: true, logs: false }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl craft_settings::Settings for TexPrefs {
+    const APP_ID: &'static str = "texcraft";
+    const SCHEMA_VERSION: u32 = 1;
+
+    fn migrate(_from: u32, _doc: &mut craft_settings::DocumentMut) -> Result<(), craft_settings::MigrateError> {
+        Ok(())
+    }
+}
+
+/// Native: the real craft-settings store (platform config dir, atomic
+/// TOML writes, backup + recovery).
+#[cfg(not(target_arch = "wasm32"))]
+type PrefsStore = craft_settings::SettingsStore<TexPrefs>;
+
+/// Wasm: craft-settings' persistent store doesn't exist there — a
+/// same-shaped in-memory stub keeps the call sites unconditional.
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct PrefsStore(TexPrefs);
+
+#[cfg(target_arch = "wasm32")]
+impl PrefsStore {
+    fn get(&self) -> &TexPrefs {
+        &self.0
+    }
+
+    fn update(&mut self, f: impl FnOnce(&mut TexPrefs)) -> bool {
+        f(&mut self.0);
+        true
+    }
+
+    fn flush(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+/// Open the prefs store — platform config dir on native, memory on wasm.
+fn open_prefs() -> PrefsStore {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        craft_settings::SettingsStore::<TexPrefs>::open(craft_settings::Location::Auto).0
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        PrefsStore::default()
+    }
 }
 
 /// A SyncTeX highlight on a preview page: which page, the box in PDF
@@ -138,6 +228,8 @@ pub struct TexApp {
     engines: Vec<String>,
     engine_sel: Option<usize>,
     new_entry: Option<NewEntry>,
+    /// Insert-citation picker (`Ctrl+Shift+C` / top-bar button).
+    cite: cite::CiteDialog,
     /// `% !TeX`/`% !BIB` header directives of the buffer — reparsed
     /// with the structure pass so the status line can show the
     /// engine/root hint.
@@ -155,13 +247,40 @@ pub struct TexApp {
     /// `last_edit` value at the last compile attempt — a failed compile
     /// does not retrigger until the user edits again.
     compiled_edit: f64,
+
+    // Persisted preferences (M4): memory-only on wasm.
+    settings: PrefsStore,
+
+    /// "New from template" modal: catalog rows `(id, name, desc)` from
+    /// `template.list`, the picked row, and the new file's name.
+    #[cfg(not(target_arch = "wasm32"))]
+    tpl_open: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    tpls: Vec<(String, String, String)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    tpl_sel: Option<usize>,
+    #[cfg(not(target_arch = "wasm32"))]
+    tpl_name: String,
+
+    /// Local-history window: `snapshot.list` rows `(id, ts, label,
+    /// files)`, a pending restore id awaiting its second click, and the
+    /// label for the next `project.snapshot`.
+    #[cfg(not(target_arch = "wasm32"))]
+    hist_open: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    snaps: Vec<(String, String, String, i64)>,
+    #[cfg(not(target_arch = "wasm32"))]
+    hist_confirm: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    hist_label: String,
 }
 const AUTOCOMPILE_IDLE_SECS: f64 = 5.0;
 
 impl TexApp {
     /// Create the app; `file` (optional) is opened at startup.
     pub fn new(_cc: &eframe::CreationContext<'_>, file: Option<PathBuf>) -> Self {
-        theme::apply(&_cc.egui_ctx, true);
+        let settings = open_prefs();
+        theme::apply(&_cc.egui_ctx, settings.get().dark);
         let mut app = TexApp {
             session: Session::new(),
             doc: DocStructure::default(),
@@ -190,6 +309,7 @@ impl TexApp {
             engines: Vec::new(),
             engine_sel: None,
             new_entry: None,
+            cite: cite::CiteDialog::default(),
             magic: texparse::Magic::default(),
             complete: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -197,11 +317,35 @@ impl TexApp {
             autocompile: false,
             last_edit: f64::NEG_INFINITY,
             compiled_edit: f64::NEG_INFINITY,
+            settings,
+            #[cfg(not(target_arch = "wasm32"))]
+            tpl_open: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            tpls: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            tpl_sel: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            tpl_name: String::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            hist_open: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            snaps: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            hist_confirm: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            hist_label: String::new(),
         };
+        // Restore the non-theme prefs (theme applied above).
+        let p = app.settings.get().clone();
+        app.autocompile = p.autocompile;
+        app.zoom = Zoom::from_pref(&p.zoom);
+        app.outline_open = p.outline;
+        app.show_logs = p.logs;
         app.session = Session::with_source(DEFAULT_DOC.to_string());
         #[cfg(not(target_arch = "wasm32"))]
         {
             app.engines = texcraft_engine::detect_engines();
+            app.engine_sel = app.engines.iter().position(|e| *e == p.engine);
         }
         match file {
             Some(p) => app.open_path(p),
@@ -848,6 +992,17 @@ impl TexApp {
                     if ui.selectable_label(self.outline_open, "Outline").clicked() {
                         self.outline_open = !self.outline_open;
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.selectable_label(self.hist_open, "History").clicked() {
+                        self.hist_open = !self.hist_open;
+                        if self.hist_open {
+                            self.load_snaps();
+                            self.hist_confirm = None;
+                        }
+                    }
+                    if cite::cite_button(ui).clicked() {
+                        self.open_cite(ui.ctx());
+                    }
                     ui.separator();
                     if theme_toggle(ui).clicked() {
                         theme::apply(ui.ctx(), !theme::is_dark());
@@ -879,6 +1034,13 @@ impl TexApp {
                     }
                     if ui.small_button("📂").on_hover_text("open file…").clicked() {
                         self.open_dialog();
+                    }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.small_button("📋+").on_hover_text("new from template…").clicked() {
+                        self.load_templates();
+                        self.tpl_sel = None;
+                        self.tpl_name.clear();
+                        self.tpl_open = true;
                     }
                     ui.add_space(4.0);
                 });
@@ -1396,6 +1558,44 @@ impl TexApp {
             });
     }
 
+    /// `Ctrl+Shift+C` / the cite button: snapshot the editor caret, then
+    /// open the picker — the dialog's filter steals focus immediately.
+    fn open_cite(&mut self, ctx: &egui::Context) {
+        // In folded mode the caret's char index is in view coordinates;
+        // `cursor_lc` is already mapped back to source coordinates.
+        let st_caret = if self.folded.is_empty() {
+            self.editor_id
+                .and_then(|id| egui::text_edit::TextEditState::load(ctx, id))
+                .and_then(|st| st.cursor.char_range())
+                .map(|r| r.primary.index.0)
+        } else {
+            None
+        };
+        let root = self.project_root();
+        self.cite.open(&root);
+        self.cite.saved_caret = st_caret.or_else(|| {
+            let (l, c) = self.cursor_lc;
+            Some(char_index_of_lc(self.session.source(), l, c))
+        });
+    }
+
+    /// Insert the picked key at the saved caret — `\cite{key}` at a
+    /// fresh spot, or `key,` merged into an existing cite's braces.
+    /// `now` is egui's frame time so the insert counts as a normal edit
+    /// for the idle auto-compile timer.
+    fn insert_cite(&mut self, key: &str, now: f64) {
+        let mut src = self.session.source().to_string();
+        let caret_ci = self.cite.saved_caret.unwrap_or(0).min(src.chars().count());
+        let caret_b = byte_of_char(&src, caret_ci);
+        let ins = cite::insert_text(&src, caret_b, key);
+        src.insert_str(caret_b, &ins);
+        self.session.set_source(src);
+        self.reparse();
+        self.folded.clear(); // any edit invalidates folds
+        self.goto = Some(caret_b + ins.len());
+        self.last_edit = now;
+    }
+
     /// Modal: create a file or folder in the project tree.
     fn new_entry_modal(&mut self, ctx: &egui::Context) {
         let Some(entry) = &mut self.new_entry else { return };
@@ -1430,6 +1630,182 @@ impl TexApp {
             }
         } else {
             self.new_entry = Some(entry);
+        }
+    }
+
+    /// Refresh the template catalog (engine `template.list`).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_templates(&mut self) {
+        self.tpls = self
+            .session
+            .execute("template.list", &serde_json::json!({}))
+            .ok()
+            .and_then(|v| {
+                v["templates"].as_array().map(|a| {
+                    a.iter()
+                        .map(|t| {
+                            (
+                                t["id"].as_str().unwrap_or_default().to_string(),
+                                t["name"].as_str().unwrap_or_default().to_string(),
+                                t["desc"].as_str().unwrap_or_default().to_string(),
+                            )
+                        })
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+    }
+
+    /// Modal: pick a template, name the file, create it in the project
+    /// root via `template.new`, then open it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tpl_modal(&mut self, ctx: &egui::Context) {
+        if !self.tpl_open {
+            return;
+        }
+        let mut sel = self.tpl_sel;
+        let mut create = false;
+        let mut close = false;
+        egui::Window::new("New from template").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).show(
+            ctx,
+            |ui| {
+                if self.tpls.is_empty() {
+                    ui.label(egui::RichText::new("no templates found").size(11.0).color(theme::pal().muted));
+                }
+                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                    for (i, (id, name, desc)) in self.tpls.iter().enumerate() {
+                        if ui.selectable_label(sel == Some(i), format!("{name}  ({id})")).clicked() {
+                            sel = Some(i);
+                            if self.tpl_name.is_empty() {
+                                self.tpl_name = format!("{id}.tex");
+                            }
+                        }
+                        ui.label(egui::RichText::new(desc).size(9.5).color(theme::pal().muted));
+                    }
+                });
+                ui.add(egui::TextEdit::singleline(&mut self.tpl_name).hint_text("name.tex").desired_width(240.0));
+                ui.horizontal(|ui| {
+                    create = ui.add_enabled(sel.is_some() && !self.tpl_name.trim().is_empty(), egui::Button::new("Create")).clicked();
+                    close = ui.button("Cancel").clicked();
+                });
+            },
+        );
+        self.tpl_sel = sel;
+        if create {
+            if let Some((id, _, _)) = self.tpl_sel.and_then(|i| self.tpls.get(i)) {
+                let path = self.project_root().join(self.tpl_name.trim());
+                match self.session.execute("template.new", &serde_json::json!({"id": id, "path": path.display().to_string()})) {
+                    Ok(_) => {
+                        self.tree_scanned_at = f64::NEG_INFINITY;
+                        self.open_path(path);
+                        self.tpl_open = false;
+                    }
+                    Err(e) => self.status = format!("template.new: {e}"),
+                }
+            }
+        }
+        if close {
+            self.tpl_open = false;
+        }
+    }
+
+    /// Refresh the snapshot list (engine `snapshot.list`).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_snaps(&mut self) {
+        self.snaps = self
+            .session
+            .execute("snapshot.list", &serde_json::json!({}))
+            .ok()
+            .and_then(|v| {
+                v["snapshots"].as_array().map(|a| {
+                    a.iter()
+                        .map(|s| {
+                            (
+                                s["id"].as_str().unwrap_or_default().to_string(),
+                                s["ts"].as_str().unwrap_or_default().to_string(),
+                                s["label"].as_str().unwrap_or_default().to_string(),
+                                s["files"].as_i64().unwrap_or(0),
+                            )
+                        })
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+    }
+
+    /// Window: local-history snapshots — take one with a label, or
+    /// restore an older tree (two-click confirm; overwrites sources).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hist_modal(&mut self, ctx: &egui::Context) {
+        if !self.hist_open {
+            return;
+        }
+        let mut snap = false;
+        let mut restore: Option<String> = None;
+        let mut close = false;
+        egui::Window::new("Local history").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).show(
+            ctx,
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.hist_label).hint_text("label (optional)").desired_width(180.0));
+                    snap = ui.button("snapshot now").clicked();
+                });
+                ui.separator();
+                if self.snaps.is_empty() {
+                    ui.label(egui::RichText::new("no snapshots yet").size(11.0).color(theme::pal().muted));
+                }
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for (id, ts, label, files) in &self.snaps {
+                        ui.horizontal(|ui| {
+                            let confirming = self.hist_confirm.as_deref() == Some(id.as_str());
+                            if ui.selectable_label(confirming, "restore").clicked() {
+                                if confirming {
+                                    restore = Some(id.clone());
+                                } else {
+                                    self.hist_confirm = Some(id.clone());
+                                }
+                            }
+                            if confirming {
+                                ui.label(egui::RichText::new("click again to overwrite the working tree").size(9.5).color(theme::pal().warn));
+                            }
+                            let line = if label.is_empty() { format!("{ts}  ({files} files)") } else { format!("{ts}  {label}  ({files} files)") };
+                            ui.label(egui::RichText::new(line).size(10.5));
+                        });
+                    }
+                });
+                ui.separator();
+                close = ui.button("Close").clicked();
+            },
+        );
+        if snap {
+            let label = self.hist_label.trim();
+            match self.session.execute("project.snapshot", &serde_json::json!({"label": label})) {
+                Ok(v) => {
+                    self.status = format!("snapshot {} — {} file(s)", v["id"].as_str().unwrap_or("?"), v["files"].as_i64().unwrap_or(0));
+                    self.load_snaps();
+                }
+                Err(e) => self.status = format!("snapshot: {e}"),
+            }
+        }
+        if let Some(id) = restore {
+            match self.session.execute("snapshot.restore", &serde_json::json!({"id": id, "confirm": true})) {
+                Ok(v) => {
+                    self.status = format!("restored {} file(s) from {id}", v["restored"].as_i64().unwrap_or(0));
+                    // Reload the open file — restore overwrote it on disk.
+                    if let Some(p) = self.session.path().map(Path::to_path_buf) {
+                        if let Err(e) = self.session.open(&p) {
+                            self.status = format!("restored, but reload failed: {e}");
+                        } else {
+                            self.reparse();
+                        }
+                    }
+                }
+                Err(e) => self.status = format!("restore: {e}"),
+            }
+            self.hist_confirm = None;
+        }
+        if close {
+            self.hist_open = false;
         }
     }
 }
@@ -1482,6 +1858,19 @@ fn handle_screenshot(_ctx: &egui::Context) {}
 /// Byte offset of the `ci`-th char in `src` (clamped to `src.len()`).
 fn byte_of_char(src: &str, ci: usize) -> usize {
     src.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(src.len())
+}
+
+/// Char index of (1-based `line`, 1-based char `col`) in `src` — the
+/// inverse of `track_cursor`'s index→Ln/Col walk.
+fn char_index_of_lc(src: &str, line: usize, col: usize) -> usize {
+    let mut idx = 0usize;
+    for (i, l) in src.split('\n').enumerate() {
+        if i + 1 == line {
+            return idx + col.saturating_sub(1).min(l.chars().count());
+        }
+        idx += l.chars().count() + 1;
+    }
+    src.chars().count()
 }
 
 /// Byte offset of (1-based `line`, 1-based byte `col`) in `src`.
@@ -1664,21 +2053,44 @@ impl eframe::App for TexApp {
     /// `craft_quit::on_close_request` stays last: it quits through the
     /// platform's own path where closing the window directly is unsafe
     /// (macOS).
+    #[cfg_attr(not(target_arch = "wasm32"), allow(clippy::disallowed_methods))] // Instant::now for prefs debounce
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.poll_compile(ctx);
             self.poll_tool(ctx);
             self.tick_autocompile(ctx);
+            // Write prefs when the debounce has passed — wasm's store is
+            // memory-only and Instant isn't readable there anyway.
+            self.settings.tick(std::time::Instant::now());
         }
         self.refresh_tree(ctx);
+        // Mirror UI state into prefs each frame — `update` no-ops when
+        // nothing changed; `tick` writes the file after its debounce.
+        let engine = self.engine_sel.and_then(|i| self.engines.get(i).cloned()).unwrap_or_default();
+        let (dark, auto, zoom, outline, logs) = (theme::is_dark(), self.autocompile, self.zoom.pref(), self.outline_open, self.show_logs);
+        self.settings.update(|p| {
+            p.dark = dark;
+            p.autocompile = auto;
+            p.engine = engine.clone();
+            p.zoom = zoom.clone();
+            p.outline = outline;
+            p.logs = logs;
+        });
         craft_quit::on_close_request(ctx);
+    }
+
+    fn on_exit(&mut self) {
+        let _ = self.settings.flush();
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if ctx.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.ctrl) {
             self.save();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.ctrl && i.modifiers.shift) && !self.cite.is_open() {
+            self.open_cite(&ctx);
         }
         self.editor_shortcuts(&ctx);
         handle_screenshot(&ctx);
@@ -1690,5 +2102,14 @@ impl eframe::App for TexApp {
         self.status_bar(ui);
         self.editor_pane(ui);
         self.new_entry_modal(&ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.tpl_modal(&ctx);
+            self.hist_modal(&ctx);
+        }
+        if let Some(key) = self.cite.show(&ctx, theme::pal()) {
+            let now = ctx.input(|i| i.time);
+            self.insert_cite(&key, now);
+        }
     }
 }

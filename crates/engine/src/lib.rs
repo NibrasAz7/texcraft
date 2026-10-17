@@ -11,6 +11,9 @@
 //! enabled — Tectonic has no equivalent flag and the system engines
 //! are never passed one. `user_tool.*` commands run TeXstudio-style
 //! named external tools (fixed argv, no shell — see [`tools`]).
+//! `template.*` commands serve the shipped template gallery (see
+//! [`templates`]); `project.snapshot`/`snapshot.*` keep local file
+//! history under `.texcraft/snapshots/` (see [`history`]).
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -20,13 +23,16 @@ use std::process::Command;
 use serde_json::{json, Value};
 use texparse::{parse_magic, parse_structure, DocStructure};
 
+pub mod history;
 pub mod synctex;
+pub mod templates;
 pub mod tools;
 
 pub use tools::UserTool;
 
-/// Hidden build directory next to the document (`.aux`/`.log`/`.pdf`).
-const BUILD_DIR: &str = ".texcraft";
+/// Hidden build directory next to the document (`.aux`/`.log`/`.pdf`,
+/// `snapshots/`).
+pub(crate) const BUILD_DIR: &str = ".texcraft";
 
 /// Packages that require a Unicode TeX engine (XeTeX/LuaTeX).
 const UNICODE_PACKAGES: [&str; 4] = ["fontspec", "unicode-math", "polyglossia", "bidi"];
@@ -248,6 +254,32 @@ impl Session {
                 self.user_tools.clear();
                 Ok(json!({"ok": true}))
             }
+            "template.list" => templates::list(),
+            "template.read" => templates::read(params),
+            "template.new" => templates::new(params),
+            // The reachable file graph from the open document — root
+            // candidates, sources, resources, unresolved deps (M4).
+            "project.graph" => {
+                let Some(p) = &self.path else { return Err(EngineError::NoFile) };
+                let g = texparse::graph::build(p);
+                Ok(json!({
+                    "roots": g.roots.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    "files": g.files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    "resources": g.resources.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                    // `.sty`/`.cls` "missing" deps are normal — the class
+                    // and packages live in the TeX distro, not the project.
+                    "missing": g.missing.iter().map(|(r, d)| json!({
+                        "referrer": r.display().to_string(),
+                        "kind": format!("{:?}", d.kind),
+                        "target": d.target,
+                        "line": d.line,
+                    })).collect::<Vec<_>>(),
+                }))
+            }
+            "project.snapshot" => history::snapshot(self, params),
+            "snapshot.list" => history::list(self),
+            "snapshot.read" => history::read(self, params),
+            "snapshot.restore" => history::restore(self, params),
             other => Err(EngineError::UnknownCommand(other.to_string())),
         }
     }
@@ -685,6 +717,14 @@ mod tests {
             "user_tool.set",
             "user_tool.run",
             "user_tool.clear",
+            "template.list",
+            "template.read",
+            "template.new",
+            "project.graph",
+            "project.snapshot",
+            "snapshot.list",
+            "snapshot.read",
+            "snapshot.restore",
             "garbage",
         ] {
             for p in [json!(null), json!({"path": 1, "text": null}), json!("x"), json!([1, 2])] {

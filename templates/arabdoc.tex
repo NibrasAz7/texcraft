@@ -1,0 +1,26 @@
+% TexCraft template: Arabic document via polyglossia (the modern
+% Unicode path — no arabtex). Compile with xelatex or lualatex;
+% pdflatex cannot shape Arabic. Requires an Arabic OpenType font —
+% Amiri by default; change \arabicfont to Noto Naskh Arabic or
+% Scheherazade New if Amiri is not installed.
+% !TeX program = xelatex
+\documentclass[12pt]{article}
+
+\usepackage{polyglossia}
+\setmainlanguage{arabic}
+\setotherlanguage{english}
+\newfontfamily\arabicfont[Script=Arabic]{Amiri}
+
+\title{عنوان المستند}
+\author{اسم المؤلف}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{Arabic}
+مرحبا بالعالم! هذا نص عربي قصير داخل مستند \textenglish{LaTeX} حديث.
+\end{Arabic}
+
+\end{document}

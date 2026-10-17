@@ -300,7 +300,7 @@ fn end_pos(toks: &[Token]) -> Pos {
 }
 
 /// Skip whitespace-only Text, Newline and Comment tokens.
-fn skip_ws(toks: &[Token], mut i: usize) -> usize {
+pub(crate) fn skip_ws(toks: &[Token], mut i: usize) -> usize {
     while let Some(t) = toks.get(i) {
         match &t.kind {
             Tok::Text(s) if s.trim().is_empty() => i += 1,
@@ -313,7 +313,7 @@ fn skip_ws(toks: &[Token], mut i: usize) -> usize {
 
 /// `[opts]` — consume an optional bracket group, return its text and the
 /// index after it (or the starting index when there is none).
-fn opt_arg(toks: &[Token], i: usize) -> (String, usize) {
+pub(crate) fn opt_arg(toks: &[Token], i: usize) -> (String, usize) {
     let j = skip_ws(toks, i);
     if !matches!(toks.get(j).map(|t| &t.kind), Some(Tok::LBracket)) {
         return (String::new(), i);
@@ -351,7 +351,7 @@ fn opt_arg(toks: &[Token], i: usize) -> (String, usize) {
 /// token isn't `{`, a single token is the argument (TeX's single-token
 /// argument rule, e.g. `\section x`). A group that never closes pushes an
 /// issue (credited to `\cmd`) and returns what was captured.
-fn group_text(toks: &[Token], i: usize, cmd: &str, issues: &mut Vec<Issue>) -> Option<(String, usize)> {
+pub(crate) fn group_text(toks: &[Token], i: usize, cmd: &str, issues: &mut Vec<Issue>) -> Option<(String, usize)> {
     let j = skip_ws(toks, i);
     let first = toks.get(j)?;
     if !matches!(first.kind, Tok::LBrace) {

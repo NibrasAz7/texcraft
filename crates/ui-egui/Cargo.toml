@@ -18,6 +18,8 @@ texpkg = { path = "../texpkg" }
 texcraft-engine = { path = "../engine" }
 craft-atomic.workspace = true
 craft-quit.workspace = true
+craft-settings.workspace = true
+serde = { version = "1", features = ["derive"] }
 egui = "0.36"
 eframe = "0.36"
 serde_json = "1"

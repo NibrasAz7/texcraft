@@ -1,0 +1,2 @@
+name = "Arabic document"
+desc = "Arabic article via polyglossia and an Arabic OpenType font (xelatex/lualatex only)."
