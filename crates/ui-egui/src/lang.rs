@@ -4,11 +4,10 @@
 //! translate each field.
 //!
 //! Arabic-table entries are stored in **logical order** (normal Unicode
-//! text). egui does no complex-text shaping, so [`view`] reshapes to
-//! presentation forms and reorders RTL runs for display — apply it to any
-//! *non-editable* string that may contain Arabic (UI chrome and user
-//! content like file names). Editable buffers must NOT pass through it:
-//! it reorders characters, which would desync caret math.
+//! text). egui's harfrust shaper detects RTL runs and returns visual-order
+//! glyphs itself, so strings reach the painter untouched — [`view`] is a
+//! passthrough kept only as the display-boundary seam. Never pre-shape:
+//! a presentation-form string is re-reversed by the shaper (mirrored out).
 
 use std::borrow::Cow;
 
@@ -178,16 +177,14 @@ pub struct Strings {
     pub ai_ask: &'static str,
 }
 
-/// Substitute `{name}`-style placeholders in a catalog format string.
-/// Substitute `{name}` placeholders and run the result through
-/// [`view`] — callers display the string directly; without the view
-/// pass Arabic renders logical-order unshaped (scrambled).
+/// Substitute `{name}` placeholders in a catalog format string. The
+/// result reaches egui's shaper untouched — do not pre-reorder.
 pub fn fmt(fmt: &'static str, pairs: &[(&str, &str)]) -> String {
     let mut out = fmt.to_string();
     for (k, v) in pairs {
         out = out.replace(&format!("{{{k}}}"), v);
     }
-    view(&out).into_owned()
+    out
 }
 
 const EN: Strings = Strings {
@@ -420,26 +417,14 @@ pub fn strings(lang: Lang) -> &'static Strings {
     }
 }
 
-/// Does `s` contain characters that need Arabic-script shaping?
-fn needs_shape(s: &str) -> bool {
-    s.chars().any(|c| matches!(c as u32, 0x0600..=0x06FF | 0x0750..=0x077F | 0x08A0..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF))
-}
-
-/// Prepare `s` for display in egui's LTR-only, unshaped text pipeline:
-/// Arabic-script characters are mapped to their contextual presentation
-/// forms and bidi runs are reordered into visual order. Zero-cost borrow
-/// for strings without Arabic. Never apply to an editable buffer.
+/// Display-boundary seam for localized/user strings. egui ≥0.36 ships a
+/// harfrust shaper that guesses per-run direction and emits visual-order
+/// glyphs — Arabic renders correctly from plain logical-order text, so
+/// this is a borrow passthrough. Do NOT resurrect manual reshaping here:
+/// pre-shaped input gets re-reversed by the shaper (mirrored output).
+#[inline]
 pub fn view(s: &str) -> Cow<'_, str> {
-    if !needs_shape(s) {
-        return Cow::Borrowed(s);
-    }
-    let reshaped = arabic_reshaper::arabic_reshape(s);
-    let bidi = unicode_bidi::BidiInfo::new(&reshaped, None);
-    let mut out = String::with_capacity(reshaped.len());
-    for para in &bidi.paragraphs {
-        out.push_str(&bidi.reorder_line(para, para.range.clone()));
-    }
-    Cow::Owned(out)
+    Cow::Borrowed(s)
 }
 
 #[cfg(test)]
@@ -471,22 +456,11 @@ mod tests {
     }
 
     #[test]
-    fn view_shapes_arabic() {
-        let shaped = view("مرحبا");
-        assert!(matches!(shaped, Cow::Owned(_)));
-        assert_ne!(shaped.as_ref(), "مرحبا"); // presentation forms differ
-                                              // م ر ح ب ا — reshaping preserves the character count (1:1 forms).
-        assert_eq!(shaped.chars().count(), 5);
-    }
-
-    #[test]
-    fn view_reorders_rtl_runs() {
-        // "a ب b" visually shows the RTL run reversed relative to logical.
-        let shaped = view("a بب b");
-        // Logical order is a, ب, ب, b; visual order puts the بب run's
-        // mirrored forms between the Latin letters.
-        assert!(shaped.contains('a'));
-        assert!(shaped.contains('b'));
+    fn view_is_passthrough_for_arabic() {
+        // egui's harfrust shaper wants plain logical-order text; view()
+        // must not transform it.
+        assert!(matches!(view("مرحبا"), Cow::Borrowed(_)));
+        assert_eq!(view("مرحبا").as_ref(), "مرحبا");
     }
 
     #[test]
@@ -501,10 +475,8 @@ mod tests {
     }
 
     #[test]
-    fn fmt_shapes_arabic_output() {
-        let out = fmt("سطر {l}، عمود {c}", &[("l", "5"), ("c", "12")]);
-        // Visual-order output differs from the logical template.
-        assert_ne!(out, "سطر 5، عمود 12");
-        assert!(out.contains('5') && out.contains("12"));
+    fn fmt_leaves_arabic_in_logical_order() {
+        // Substitution only — the shaper needs untouched logical text.
+        assert_eq!(fmt("سطر {l}، عمود {c}", &[("l", "5"), ("c", "12")]), "سطر 5، عمود 12");
     }
 }

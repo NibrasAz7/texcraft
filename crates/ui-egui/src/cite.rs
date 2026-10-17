@@ -229,7 +229,7 @@ impl CiteDialog {
 }
 
 /// The top-bar "cite" button: a tiny open-book glyph plus the label.
-/// `label` is already display-shaped by the caller.
+/// `label` is painted as-is; egui's shaper handles RTL/scripts itself.
 pub fn cite_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(44.0, 20.0), egui::Sense::click());
     let resp = resp.on_hover_text("insert citation — Ctrl+Shift+C");
