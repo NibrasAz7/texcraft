@@ -83,32 +83,57 @@ fn toml_string(v: &str) -> Option<String> {
     None
 }
 
-/// `(name, desc)` from a restricted meta file; `None` when the file
-/// can't be read, carries no `name`, or has a non-string `name`/`desc`
-/// value. Unknown keys are ignored so newer fields stay compatible.
-fn parse_meta(path: &Path) -> Option<(String, String)> {
+/// Parsed `<id>.meta.toml`. `name`/`desc` are the default (English)
+/// strings; `lang` tags the template's language (`"en"`, `"ar"`, …);
+/// `localized` holds per-language name/desc overrides from `name_<lang>`
+/// / `desc_<lang>` keys, so a template can title itself in any UI
+/// language without a new field per language.
+#[derive(Default)]
+struct Meta {
+    name: String,
+    desc: String,
+    lang: String,
+    localized: std::collections::BTreeMap<String, (String, String)>,
+}
+
+/// `Meta` from a restricted meta file; `None` when the file can't be
+/// read, carries no `name`, or has a non-string `name`/`desc` value.
+/// Unknown keys are ignored so newer fields stay compatible.
+fn parse_meta(path: &Path) -> Option<Meta> {
     let text = std::fs::read_to_string(path).ok()?;
+    let mut meta = Meta::default();
     let mut name = None;
-    let mut desc = String::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else { continue };
-        match key.trim() {
+        let key = key.trim();
+        match key {
             "name" if name.is_none() => name = Some(toml_string(value.trim())?),
-            "desc" => desc = toml_string(value.trim())?,
-            _ => {}
+            "desc" => meta.desc = toml_string(value.trim())?,
+            "lang" => meta.lang = toml_string(value.trim())?,
+            _ => {
+                if let Some(l) = key.strip_prefix("name_") {
+                    meta.localized.entry(l.to_string()).or_default().0 = toml_string(value.trim())?;
+                } else if let Some(l) = key.strip_prefix("desc_") {
+                    meta.localized.entry(l.to_string()).or_default().1 = toml_string(value.trim())?;
+                }
+            }
         }
     }
-    name.map(|n| (n, desc))
+    meta.name = name?;
+    Some(meta)
 }
 
 struct Entry {
     id: String,
     name: String,
     desc: String,
+    lang: String,
+    /// `(name, desc)` overrides keyed by language code.
+    localized: std::collections::BTreeMap<String, (String, String)>,
     path: PathBuf,
 }
 
@@ -117,7 +142,7 @@ struct Entry {
 fn scan() -> Vec<Entry> {
     let Some(dir) = templates_dir() else { return Vec::new() };
     let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
-    let mut metas: std::collections::BTreeMap<String, (String, String)> = std::collections::BTreeMap::new();
+    let mut metas: std::collections::BTreeMap<String, Meta> = std::collections::BTreeMap::new();
     let mut texs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for entry in rd.flatten() {
         let path = entry.path();
@@ -141,8 +166,8 @@ fn scan() -> Vec<Entry> {
     ids.extend(texs);
     ids.into_iter()
         .map(|id| {
-            let (name, desc) = metas.get(&id).cloned().unwrap_or_else(|| (id.clone(), String::new()));
-            Entry { path: dir.join(format!("{id}.tex")), id, name, desc }
+            let meta = metas.remove(&id).unwrap_or_else(|| Meta { name: id.clone(), ..Meta::default() });
+            Entry { path: dir.join(format!("{id}.tex")), id, name: meta.name, desc: meta.desc, lang: meta.lang, localized: meta.localized }
         })
         .collect()
 }
@@ -158,15 +183,21 @@ fn template_source(id: &str) -> Result<(Entry, String), EngineError> {
         return Err(EngineError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("template '{id}' too large"))));
     }
     let content = String::from_utf8_lossy(&std::fs::read(&path)?).into_owned();
-    let (name, desc) = parse_meta(&dir.join(format!("{id}.meta.toml"))).unwrap_or_else(|| (id.to_string(), String::new()));
-    Ok((Entry { id: id.to_string(), name, desc, path }, content))
+    let meta = parse_meta(&dir.join(format!("{id}.meta.toml"))).unwrap_or_else(|| Meta { name: id.to_string(), ..Meta::default() });
+    Ok((Entry { id: id.to_string(), name: meta.name, desc: meta.desc, lang: meta.lang, localized: meta.localized, path }, content))
 }
 
-/// `template.list {}` → `{"templates": [{"id","name","desc","path"}]}`.
+/// `template.list {}` → `{"templates": [{"id","name","desc","lang","localized","path"}]}`.
 /// Never fails on content — an absent or unreadable dir lists empty.
 pub fn list() -> Result<Value, EngineError> {
-    let templates =
-        scan().iter().map(|e| json!({"id": e.id, "name": e.name, "desc": e.desc, "path": e.path.display().to_string()})).collect::<Vec<_>>();
+    let templates = scan()
+        .iter()
+        .map(|e| {
+            json!({"id": e.id, "name": e.name, "desc": e.desc, "lang": e.lang,
+                   "localized": e.localized.iter().map(|(l, (n, d))| (l.clone(), json!({"name": n, "desc": d}))).collect::<serde_json::Map<_, _>>(),
+                   "path": e.path.display().to_string()})
+        })
+        .collect::<Vec<_>>();
     Ok(json!({"templates": templates}))
 }
 

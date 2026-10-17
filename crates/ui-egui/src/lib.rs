@@ -17,8 +17,10 @@ pub mod control;
 mod edits;
 mod files;
 mod fold;
+mod fonts;
 mod highlight;
 mod icons;
+mod lang;
 mod mathprev;
 mod mirrors;
 mod spellcheck;
@@ -98,12 +100,12 @@ impl PageMode {
     /// All modes, in menu order.
     const ALL: [PageMode; 4] = [PageMode::Scroll, PageMode::Single, PageMode::TwoUp, PageMode::TwoUpCover];
 
-    fn label(self) -> &'static str {
+    fn label(self, s: &lang::Strings) -> &'static str {
         match self {
-            PageMode::Scroll => "continuous",
-            PageMode::Single => "single page",
-            PageMode::TwoUp => "two pages",
-            PageMode::TwoUpCover => "two pages + cover",
+            PageMode::Scroll => s.page_continuous,
+            PageMode::Single => s.page_single,
+            PageMode::TwoUp => s.page_two_up,
+            PageMode::TwoUpCover => s.page_two_up_cover,
         }
     }
 
@@ -146,6 +148,8 @@ struct WarraqPrefs {
     /// — it stays in-memory for the session.
     ai_endpoint: String,
     ai_model: String,
+    /// UI language code — see [`lang::Lang::from_code`].
+    language: String,
 }
 
 impl Default for WarraqPrefs {
@@ -161,6 +165,7 @@ impl Default for WarraqPrefs {
             page_mode: "scroll".into(),
             ai_endpoint: String::new(),
             ai_model: String::new(),
+            language: "en".into(),
         }
     }
 }
@@ -334,7 +339,7 @@ pub struct WarraqApp {
     #[cfg(not(target_arch = "wasm32"))]
     tpl_open: bool,
     #[cfg(not(target_arch = "wasm32"))]
-    tpls: Vec<(String, String, String)>,
+    tpls: Vec<(String, String, String, String)>,
     #[cfg(not(target_arch = "wasm32"))]
     tpl_sel: Option<usize>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -385,6 +390,7 @@ impl WarraqApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, file: Option<PathBuf>) -> Self {
         let settings = open_prefs();
         theme::apply(&_cc.egui_ctx, settings.get().dark);
+        fonts::install(&_cc.egui_ctx);
         let mut app = WarraqApp {
             session: Session::new(),
             doc: DocStructure::default(),
@@ -596,6 +602,20 @@ impl WarraqApp {
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Current UI language from prefs (unknown codes → English).
+    fn lang(&self) -> lang::Lang {
+        lang::Lang::from_code(&self.settings.get().language)
+    }
+
+    /// The active message catalog.
+    fn s(&self) -> &'static lang::Strings {
+        lang::strings(self.lang())
+    }
+
+    fn set_lang(&mut self, l: lang::Lang) {
+        self.settings.update(|p| p.language = l.code().into());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1148,6 +1168,7 @@ impl WarraqApp {
 
     /// Top bar: project identity, save state, compile + toggles.
     fn top_bar(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
         egui::Panel::top("topbar").frame(egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(12, 7))).show(ui, |ui| {
             ui.horizontal(|ui| {
                 // Leaf mark + project name + path.
@@ -1158,11 +1179,11 @@ impl WarraqApp {
                     .session
                     .path()
                     .and_then(|p| p.parent().and_then(|d| d.file_name()).map(|d| d.to_string_lossy().into_owned()))
-                    .unwrap_or_else(|| "untitled".into());
-                ui.label(egui::RichText::new(title).strong());
+                    .unwrap_or_else(|| s.untitled.into());
+                ui.label(egui::RichText::new(lang::view(&title).into_owned()).strong());
                 ui.label(egui::RichText::new(format!("~/…/{}", root.display())).small().color(theme::pal().muted));
                 let (chip, chip_col) =
-                    if self.session.dirty() { ("unsaved changes", theme::pal().warn) } else { ("saved locally", theme::pal().accent_dim) };
+                    if self.session.dirty() { (s.unsaved_changes, theme::pal().warn) } else { (s.saved_locally, theme::pal().accent_dim) };
                 {
                     let (ir, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                     if self.session.dirty() {
@@ -1171,19 +1192,19 @@ impl WarraqApp {
                         icons::check(ui.painter(), ir, chip_col);
                     }
                 }
-                ui.label(egui::RichText::new(chip).small().color(chip_col));
+                ui.label(egui::RichText::new(lang::view(chip)).small().color(chip_col));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Engine pick rides on Recompile's chevron.
                     let enabled = !self.compiling;
-                    if filled_icon_button(ui, 14.0, icons::rebuild, "Recompile", theme::pal().accent, enabled).clicked() {
+                    if filled_icon_button(ui, 14.0, icons::rebuild, &lang::view(s.recompile), theme::pal().accent, enabled).clicked() {
                         self.start_compile();
                     }
-                    let menu_resp =
-                        filled_icon_button(ui, 12.0, icons::chevron_down, "", theme::pal().accent_dim, enabled).on_hover_text("compile options");
+                    let menu_resp = filled_icon_button(ui, 12.0, icons::chevron_down, "", theme::pal().accent_dim, enabled)
+                        .on_hover_text(lang::view(s.compile_options).into_owned());
                     egui::Popup::from_toggle_button_response(&menu_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                         ui.set_min_width(140.0);
-                        if ui.selectable_label(self.engine_sel.is_none(), "auto").clicked() {
+                        if ui.selectable_label(self.engine_sel.is_none(), lang::view(s.engine_auto)).clicked() {
                             self.engine_sel = None;
                         }
                         for (i, e) in self.engines.iter().enumerate() {
@@ -1192,7 +1213,7 @@ impl WarraqApp {
                             }
                         }
                         ui.separator();
-                        ui.checkbox(&mut self.autocompile, "auto-compile after 5 s idle");
+                        ui.checkbox(&mut self.autocompile, lang::view(s.auto_compile).into_owned());
                         // User tools from warraqcraft-tools.json — fixed-argv
                         // external commands run on a worker (M2 surface).
                         #[cfg(not(target_arch = "wasm32"))]
@@ -1200,10 +1221,10 @@ impl WarraqApp {
                             let tools: Vec<String> = self.session.user_tools().iter().map(|t| t.name.clone()).collect();
                             if !tools.is_empty() {
                                 ui.separator();
-                                ui.label(egui::RichText::new("user tools").size(10.0).color(theme::pal().muted));
+                                ui.label(egui::RichText::new(lang::view(s.user_tools)).size(10.0).color(theme::pal().muted));
                                 let mut run: Option<String> = None;
                                 for name in tools {
-                                    if ui.selectable_label(false, &name).clicked() {
+                                    if ui.selectable_label(false, lang::view(&name)).clicked() {
                                         run = Some(name);
                                     }
                                 }
@@ -1212,40 +1233,50 @@ impl WarraqApp {
                                 }
                             }
                         }
+                        ui.separator();
+                        ui.label(egui::RichText::new(lang::view(s.language)).size(10.0).color(theme::pal().muted));
+                        for l in lang::ALL {
+                            if ui.selectable_label(self.lang() == *l, lang::view(l.native_name())).clicked() {
+                                self.set_lang(*l);
+                            }
+                        }
                     });
                     if self.compiling {
                         ui.spinner();
                     }
                     ui.separator();
-                    if ui.selectable_label(self.show_logs, "Logs").clicked() {
+                    if ui.selectable_label(self.show_logs, lang::view(s.logs)).clicked() {
                         self.show_logs = !self.show_logs;
                     }
-                    if ui.selectable_label(self.outline_open, "Outline").clicked() {
+                    if ui.selectable_label(self.outline_open, lang::view(s.outline)).clicked() {
                         self.outline_open = !self.outline_open;
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    if ui.selectable_label(self.hist_open, "History").clicked() {
+                    if ui.selectable_label(self.hist_open, lang::view(s.history)).clicked() {
                         self.hist_open = !self.hist_open;
                         if self.hist_open {
                             self.load_snaps();
                             self.hist_confirm = None;
                         }
                     }
-                    if ui.selectable_label(self.stats_open, "Stats").on_hover_text("word/character counts").clicked() {
+                    if ui.selectable_label(self.stats_open, lang::view(s.stats)).on_hover_text(lang::view(s.stats_hint).into_owned()).clicked() {
                         self.stats_open = !self.stats_open;
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    if ui.selectable_label(self.ai.open, "AI").on_hover_text("AI assist — bring your own endpoint").clicked() {
+                    if ui.selectable_label(self.ai.open, lang::view(s.ai)).on_hover_text(lang::view(s.ai_hint).into_owned()).clicked() {
                         self.ai.open = !self.ai.open;
                     }
-                    if cite::cite_button(ui).clicked() {
+                    if cite::cite_button(ui, s.cite).clicked() {
                         self.open_cite(ui.ctx());
                     }
-                    if icon_button(ui, 14.0, icons::question, "", true).on_hover_text("keyboard shortcuts (F1)").clicked() {
+                    if icon_button(ui, 14.0, icons::question, &lang::view(s.help), true)
+                        .on_hover_text(lang::view(s.shortcuts_hint).into_owned())
+                        .clicked()
+                    {
                         self.shortcuts_open = !self.shortcuts_open;
                     }
                     ui.separator();
-                    if theme_toggle(ui).clicked() {
+                    if theme_toggle(ui, s).clicked() {
                         theme::apply(ui.ctx(), !theme::is_dark());
                     }
                 });
@@ -1253,9 +1284,12 @@ impl WarraqApp {
         });
     }
 
-    /// Left sidebar: file toolbar, project tree, FILE OUTLINE.
+    /// Left sidebar: file toolbar, project tree, FILE OUTLINE. In an RTL
+    /// UI the whole dock mirrors: files on the right, preview left.
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::left("sidebar")
+        let s = self.s();
+        let panel = if self.lang().rtl() { egui::Panel::right("sidebar") } else { egui::Panel::left("sidebar") };
+        panel
             .resizable(true)
             .default_size(230.0)
             .size_range(160.0..=420.0)
@@ -1264,20 +1298,20 @@ impl WarraqApp {
                 // Icon row: new file / new folder / refresh / open.
                 ui.horizontal(|ui| {
                     let root = self.project_root();
-                    if icon_button(ui, 14.0, icons::page_new, "", true).on_hover_text("new file").clicked() {
+                    if icon_button(ui, 14.0, icons::page_new, "", true).on_hover_text(lang::view(s.new_file)).clicked() {
                         self.new_entry = Some(NewEntry { dir: root.clone(), name: String::new(), is_dir: false });
                     }
-                    if icon_button(ui, 14.0, icons::folder_new, "", true).on_hover_text("new folder").clicked() {
+                    if icon_button(ui, 14.0, icons::folder_new, "", true).on_hover_text(lang::view(s.new_folder)).clicked() {
                         self.new_entry = Some(NewEntry { dir: root.clone(), name: String::new(), is_dir: true });
                     }
-                    if icon_button(ui, 14.0, icons::rebuild, "", true).on_hover_text("refresh tree").clicked() {
+                    if icon_button(ui, 14.0, icons::rebuild, "", true).on_hover_text(lang::view(s.refresh_tree)).clicked() {
                         self.tree_scanned_at = f64::NEG_INFINITY;
                     }
-                    if icon_button(ui, 14.0, icons::folder_open, "", true).on_hover_text("open file…").clicked() {
+                    if icon_button(ui, 14.0, icons::folder_open, "", true).on_hover_text(lang::view(s.open_file)).clicked() {
                         self.open_dialog();
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    if icon_button(ui, 14.0, icons::page_plus, "", true).on_hover_text("new from template…").clicked() {
+                    if icon_button(ui, 14.0, icons::page_plus, "", true).on_hover_text(lang::view(s.new_from_template)).clicked() {
                         self.load_templates();
                         self.tpl_sel = None;
                         self.tpl_name.clear();
@@ -1307,7 +1341,7 @@ impl WarraqApp {
                         }
                     }
                     if self.tree.is_empty() {
-                        ui.weak("(empty folder)");
+                        ui.weak(lang::view(s.empty_folder));
                     }
                     if let Some(p) = toggle {
                         if !self.expanded.remove(&p) {
@@ -1323,20 +1357,20 @@ impl WarraqApp {
                 if self.outline_open {
                     ui.separator();
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("FILE OUTLINE").size(10.0).color(theme::pal().faint).strong());
+                        ui.label(egui::RichText::new(lang::view(s.file_outline)).size(10.0).color(theme::pal().faint).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // view.unfold_all / view.fold_all
-                            if ui.small_button("unfold").on_hover_text("view.unfold_all").clicked() {
+                            if ui.small_button(lang::view(s.unfold_all)).on_hover_text("view.unfold_all").clicked() {
                                 self.unfold_all();
                             }
-                            if ui.small_button("fold all").on_hover_text("view.fold_all").clicked() {
+                            if ui.small_button(lang::view(s.fold_all)).on_hover_text("view.fold_all").clicked() {
                                 self.fold_all();
                             }
                         });
                     });
                     egui::ScrollArea::vertical().id_salt("outline").auto_shrink([false, true]).show(ui, |ui| {
                         if self.doc.headings.is_empty() {
-                            ui.weak("(no headings)");
+                            ui.weak(lang::view(s.no_headings));
                         }
                         let mut goto = None;
                         for h in &self.doc.headings {
@@ -1345,7 +1379,9 @@ impl WarraqApp {
                             let resp = ui
                                 .horizontal(|ui| {
                                     ui.add_space(indent);
-                                    ui.add(egui::Label::new(egui::RichText::new(&h.title).color(col).size(12.0)).sense(egui::Sense::click()));
+                                    ui.add(
+                                        egui::Label::new(egui::RichText::new(lang::view(&h.title)).color(col).size(12.0)).sense(egui::Sense::click()),
+                                    );
                                 })
                                 .response;
                             if resp.hovered() {
@@ -1380,9 +1416,9 @@ impl WarraqApp {
                         .inner_margin(egui::Margin::symmetric(10, 5))
                         .stroke(egui::Stroke::new(1.0, theme::pal().border));
                     tab_frame.show(ui, |ui| {
-                        ui.label(egui::RichText::new(&name).size(12.0));
+                        ui.label(egui::RichText::new(lang::view(&name)).size(12.0));
                         if self.main_file.as_deref() == self.session.path() {
-                            ui.label(egui::RichText::new("main document").size(9.5).color(theme::pal().accent));
+                            ui.label(egui::RichText::new(lang::view(self.s().main_doc)).size(9.5).color(theme::pal().accent));
                         }
                         if self.session.dirty() {
                             ui.label(egui::RichText::new("●").size(9.0).color(theme::pal().warn));
@@ -1511,18 +1547,18 @@ impl WarraqApp {
                         ui.ctx().input(|i| i.pointer.interact_pos()).map(|p| out.galley.cursor_from_pos(p - out.galley_pos).index.0).unwrap_or(0);
                     if let Some(&(s, e)) = self.spell.scan(&src, self.src_stamp).iter().find(|(s, e)| ci >= *s && ci <= *e) {
                         for sug in self.spell.suggest(&src, s, e) {
-                            if ui.button(&sug).clicked() {
+                            if ui.button(lang::view(&sug)).clicked() {
                                 replace = Some((s, e, sug.clone()));
                                 ui.close();
                             }
                         }
                         if replace.is_none() && self.spell.suggest(&src, s, e).is_empty() {
-                            ui.weak("(no suggestions)");
+                            ui.weak(lang::view(self.s().spell_none));
                         }
                         ui.separator();
                     }
-                    let label = if self.spell.enabled() { "spell check: on" } else { "spell check: off" };
-                    if ui.button(label).clicked() {
+                    let label = if self.spell.enabled() { self.s().spell_on } else { self.s().spell_off };
+                    if ui.button(lang::view(label)).clicked() {
                         self.spell.set_enabled(!self.spell.enabled());
                         ui.close();
                     }
@@ -1669,8 +1705,12 @@ impl WarraqApp {
                 };
                 painter.add(egui::Shape::convex_polygon(pts, ink, egui::Stroke::NONE));
                 let n = r.end - r.start;
-                let lines = if n == 1 { "line" } else { "lines" };
-                let resp = resp.on_hover_text(if collapsed { format!("unfold — {n} hidden {lines}") } else { format!("fold {n} {lines}") });
+                let sf = self.s();
+                let resp = resp.on_hover_text(if collapsed {
+                    lang::fmt(sf.fold_hidden, &[("n", &n.to_string())])
+                } else {
+                    lang::fmt(sf.fold_open, &[("n", &n.to_string())])
+                });
                 if resp.clicked() {
                     self.toggle_fold(src_line);
                 }
@@ -1722,34 +1762,37 @@ impl WarraqApp {
 
     /// Editor-column status strip: language, caret, issues.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
         egui::Panel::bottom("statusbar").frame(egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(10, 3))).show(
             ui,
             |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("TeX").size(10.5).color(theme::pal().syn_cmd).strong());
+                    ui.label(egui::RichText::new(s.tex_badge).size(10.5).color(theme::pal().syn_cmd).strong());
                     ui.separator();
                     let n = self.doc.issues.len();
-                    let msg = if n == 0 { "no issues".to_string() } else { format!("⚠ {n} issue{}", if n == 1 { "" } else { "s" }) };
-                    ui.label(egui::RichText::new(msg).size(10.5).color(if n == 0 { theme::pal().muted } else { theme::pal().warn }));
+                    let msg = if n == 0 { s.issues_none.to_string() } else { lang::fmt(s.issues_many, &[("n", &n.to_string())]) };
+                    ui.label(egui::RichText::new(lang::view(&msg)).size(10.5).color(if n == 0 { theme::pal().muted } else { theme::pal().warn }));
                     if !self.folded.is_empty() {
                         ui.separator();
-                        ui.label(egui::RichText::new("folded — unfold to edit").size(10.5).color(theme::pal().warn));
+                        ui.label(egui::RichText::new(lang::view(s.folded_warn)).size(10.5).color(theme::pal().warn));
                     }
                     if let Some(h) = self.magic.engine_hint() {
                         ui.separator();
-                        ui.label(egui::RichText::new(format!("engine: {h}")).size(10.5).color(theme::pal().syn_cmd))
-                            .on_hover_text("% !TeX program — the file picks its own engine");
+                        ui.label(egui::RichText::new(lang::fmt(s.engine_label, &[("name", h)])).size(10.5).color(theme::pal().syn_cmd))
+                            .on_hover_text(lang::view(s.engine_hint).into_owned());
                     }
                     if let Some(r) = &self.magic.root {
                         ui.separator();
-                        ui.label(egui::RichText::new(format!("root→{r}")).size(10.5).color(theme::pal().muted))
-                            .on_hover_text("% !TeX root — compiles the master file");
+                        ui.label(egui::RichText::new(lang::fmt(s.root_label, &[("name", r)])).size(10.5).color(theme::pal().muted))
+                            .on_hover_text(lang::view(s.root_hint).into_owned());
                     }
                     ui.separator();
-                    ui.weak(&self.status);
+                    ui.weak(lang::view(&self.status));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            egui::RichText::new(format!("Ln {}, Col {}", self.cursor_lc.0, self.cursor_lc.1)).size(10.5).color(theme::pal().muted),
+                            egui::RichText::new(lang::fmt(s.line_col, &[("l", &self.cursor_lc.0.to_string()), ("c", &self.cursor_lc.1.to_string())]))
+                                .size(10.5)
+                                .color(theme::pal().muted),
                         );
                     });
                 });
@@ -1757,122 +1800,120 @@ impl WarraqApp {
         );
     }
 
-    /// Right pane: page navigation toolbar + single-page canvas.
+    /// Right pane: page navigation toolbar + single-page canvas. Mirrors
+    /// to the left in RTL UI languages (the sidebar takes the right).
     fn preview_pane(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::right("preview")
-            .resizable(true)
-            .default_size(460.0)
-            .size_range(240.0..=900.0)
-            .frame(egui::Frame::new().fill(theme::pal().canvas_bg))
-            .show(ui, |ui| {
-                // Toolbar: ‹ n/m ›  ·  - zoom% +  fit ▾
-                egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let n = self.pages.len();
-                        let has = n > 0;
-                        if ui.add_enabled(has && self.page_idx > 0, egui::Button::new("‹").min_size(egui::vec2(22.0, 18.0))).clicked() {
-                            self.page_step(-1);
-                        }
-                        ui.label(
-                            egui::RichText::new(if has { format!("{} / {}", self.page_idx + 1, n) } else { "– / –".into() })
-                                .size(11.0)
-                                .color(theme::pal().muted)
-                                .monospace(),
-                        );
-                        if ui.add_enabled(has && self.page_idx + 1 < n, egui::Button::new("›").min_size(egui::vec2(22.0, 18.0))).clicked() {
-                            self.page_step(1);
-                        }
-                        egui::ComboBox::from_id_salt("page-mode").selected_text(self.page_mode.label()).show_ui(ui, |ui| {
-                            for m in PageMode::ALL {
-                                ui.selectable_value(&mut self.page_mode, m, m.label());
-                            }
-                        });
-                        ui.separator();
-                        if ui.small_button("−").clicked() {
-                            self.zoom = Zoom::Pct((self.zoom_pct(ui) * 0.9).clamp(0.25, 4.0));
-                        }
-                        let pct = self.zoom_label(ui);
-                        ui.label(egui::RichText::new(pct).size(11.0).color(theme::pal().muted).monospace());
-                        if ui.small_button("+").clicked() {
-                            self.zoom = Zoom::Pct((self.zoom_pct(ui) * 1.1).clamp(0.25, 4.0));
-                        }
-                        egui::ComboBox::from_id_salt("fit")
-                            .selected_text(match self.zoom {
-                                Zoom::FitWidth => "fit width",
-                                Zoom::FitPage => "fit page",
-                                Zoom::Pct(_) => "custom",
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.zoom, Zoom::FitWidth, "fit width");
-                                ui.selectable_value(&mut self.zoom, Zoom::FitPage, "fit page");
-                                ui.separator();
-                                // Percent presets snap the custom zoom.
-                                for &p in ZOOM_PRESETS {
-                                    ui.selectable_value(&mut self.zoom, Zoom::Pct(p), format!("{:.0}%", p * 100.0));
-                                }
-                            });
-                        #[cfg(not(target_arch = "wasm32"))]
-                        if icon_button(ui, 13.0, icons::printer, "", self.pdf_path.is_some() && self.print_rx.is_none())
-                            .on_hover_text("print the PDF")
-                            .clicked()
-                        {
-                            self.print_pdf();
+        let s = self.s();
+        let panel = if self.lang().rtl() { egui::Panel::left("preview") } else { egui::Panel::right("preview") };
+        panel.resizable(true).default_size(460.0).size_range(240.0..=900.0).frame(egui::Frame::new().fill(theme::pal().canvas_bg)).show(ui, |ui| {
+            // Toolbar: ‹ n/m ›  ·  - zoom% +  fit ▾
+            egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let n = self.pages.len();
+                    let has = n > 0;
+                    if ui.add_enabled(has && self.page_idx > 0, egui::Button::new("‹").min_size(egui::vec2(22.0, 18.0))).clicked() {
+                        self.page_step(-1);
+                    }
+                    ui.label(
+                        egui::RichText::new(if has { format!("{} / {}", self.page_idx + 1, n) } else { "– / –".into() })
+                            .size(11.0)
+                            .color(theme::pal().muted)
+                            .monospace(),
+                    );
+                    if ui.add_enabled(has && self.page_idx + 1 < n, egui::Button::new("›").min_size(egui::vec2(22.0, 18.0))).clicked() {
+                        self.page_step(1);
+                    }
+                    egui::ComboBox::from_id_salt("page-mode").selected_text(lang::view(self.page_mode.label(s))).show_ui(ui, |ui| {
+                        for m in PageMode::ALL {
+                            ui.selectable_value(&mut self.page_mode, m, lang::view(m.label(s)).into_owned());
                         }
                     });
-                });
-                ui.separator();
-
-                // Canvas: dark backdrop; layout depends on self.page_mode.
-                egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                    let area = ui.available_rect_before_wrap();
-                    ui.painter().rect_filled(area, 0.0, theme::pal().canvas_bg);
-                    let n = self.pages.len();
-                    if n == 0 {
-                        ui.allocate_rect(area, egui::Sense::hover());
-                        ui.painter().text(
-                            area.center(),
-                            egui::Align2::CENTER_CENTER,
-                            if self.compiling { "compiling…" } else { "no PDF yet — press Recompile" },
-                            egui::FontId::proportional(13.0),
-                            theme::pal().faint,
-                        );
-                        return;
+                    ui.separator();
+                    if ui.small_button("−").clicked() {
+                        self.zoom = Zoom::Pct((self.zoom_pct(ui) * 0.9).clamp(0.25, 4.0));
                     }
-                    // Ctrl+wheel / pinch zoom (egui's zoom_delta handles
-                    // the modifier check) — only over the canvas.
-                    let zd = ui.ctx().input(|i| i.zoom_delta());
-                    if (zd - 1.0).abs() > f32::EPSILON && ui.ui_contains_pointer() {
-                        self.zoom = Zoom::Pct((self.zoom_pct(ui) * zd).clamp(0.25, 4.0));
+                    let pct = self.zoom_label(ui);
+                    ui.label(egui::RichText::new(pct).size(11.0).color(theme::pal().muted).monospace());
+                    if ui.small_button("+").clicked() {
+                        self.zoom = Zoom::Pct((self.zoom_pct(ui) * 1.1).clamp(0.25, 4.0));
                     }
-                    const GAP: f32 = 16.0;
-                    // Zoom baseline: in spread modes a spread is two pages
-                    // plus a gap wide. Pages may differ in size — the
-                    // fit math uses the widest/tallest page.
-                    let mut unit_w = 1.0f32;
-                    let mut unit_h = 1.0f32;
-                    for t in &self.pages {
-                        let s = t.size_vec2();
-                        unit_w = unit_w.max(s.x);
-                        unit_h = unit_h.max(s.y);
-                    }
-                    if matches!(self.page_mode, PageMode::TwoUp | PageMode::TwoUpCover) {
-                        unit_w = unit_w * 2.0 + GAP;
-                    }
-                    let zoom = match self.zoom {
-                        Zoom::Pct(p) => p,
-                        Zoom::FitWidth => (area.width() - 32.0).max(40.0) / unit_w,
-                        Zoom::FitPage => ((area.width() - 32.0) / unit_w).min((area.height() - 32.0) / unit_h).max(0.01),
-                    };
-                    self.page_rects.clear();
-                    match self.page_mode {
-                        PageMode::Scroll => self.preview_scroll(ui, area, zoom, GAP),
-                        _ => {
-                            let s = spread_first(self.page_mode, spread_of_page(self.page_mode, self.page_idx));
-                            self.preview_spread(ui, area, zoom, GAP, &spread_pages(self.page_mode, s, n));
-                        }
+                    egui::ComboBox::from_id_salt("fit")
+                        .selected_text(match self.zoom {
+                            Zoom::FitWidth => lang::view(s.zoom_fit_width).into_owned(),
+                            Zoom::FitPage => lang::view(s.zoom_fit_page).into_owned(),
+                            Zoom::Pct(_) => lang::view(s.zoom_custom).into_owned(),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.zoom, Zoom::FitWidth, lang::view(s.zoom_fit_width).into_owned());
+                            ui.selectable_value(&mut self.zoom, Zoom::FitPage, lang::view(s.zoom_fit_page).into_owned());
+                            ui.separator();
+                            // Percent presets snap the custom zoom.
+                            for &p in ZOOM_PRESETS {
+                                ui.selectable_value(&mut self.zoom, Zoom::Pct(p), format!("{:.0}%", p * 100.0));
+                            }
+                        });
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if icon_button(ui, 13.0, icons::printer, "", self.pdf_path.is_some() && self.print_rx.is_none())
+                        .on_hover_text(lang::view(s.print_hint).into_owned())
+                        .clicked()
+                    {
+                        self.print_pdf();
                     }
                 });
             });
+            ui.separator();
+
+            // Canvas: dark backdrop; layout depends on self.page_mode.
+            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                let area = ui.available_rect_before_wrap();
+                ui.painter().rect_filled(area, 0.0, theme::pal().canvas_bg);
+                let n = self.pages.len();
+                if n == 0 {
+                    ui.allocate_rect(area, egui::Sense::hover());
+                    ui.painter().text(
+                        area.center(),
+                        egui::Align2::CENTER_CENTER,
+                        if self.compiling { "compiling…" } else { "no PDF yet — press Recompile" },
+                        egui::FontId::proportional(13.0),
+                        theme::pal().faint,
+                    );
+                    return;
+                }
+                // Ctrl+wheel / pinch zoom (egui's zoom_delta handles
+                // the modifier check) — only over the canvas.
+                let zd = ui.ctx().input(|i| i.zoom_delta());
+                if (zd - 1.0).abs() > f32::EPSILON && ui.ui_contains_pointer() {
+                    self.zoom = Zoom::Pct((self.zoom_pct(ui) * zd).clamp(0.25, 4.0));
+                }
+                const GAP: f32 = 16.0;
+                // Zoom baseline: in spread modes a spread is two pages
+                // plus a gap wide. Pages may differ in size — the
+                // fit math uses the widest/tallest page.
+                let mut unit_w = 1.0f32;
+                let mut unit_h = 1.0f32;
+                for t in &self.pages {
+                    let s = t.size_vec2();
+                    unit_w = unit_w.max(s.x);
+                    unit_h = unit_h.max(s.y);
+                }
+                if matches!(self.page_mode, PageMode::TwoUp | PageMode::TwoUpCover) {
+                    unit_w = unit_w * 2.0 + GAP;
+                }
+                let zoom = match self.zoom {
+                    Zoom::Pct(p) => p,
+                    Zoom::FitWidth => (area.width() - 32.0).max(40.0) / unit_w,
+                    Zoom::FitPage => ((area.width() - 32.0) / unit_w).min((area.height() - 32.0) / unit_h).max(0.01),
+                };
+                self.page_rects.clear();
+                match self.page_mode {
+                    PageMode::Scroll => self.preview_scroll(ui, area, zoom, GAP),
+                    _ => {
+                        let s = spread_first(self.page_mode, spread_of_page(self.page_mode, self.page_idx));
+                        self.preview_spread(ui, area, zoom, GAP, &spread_pages(self.page_mode, s, n));
+                    }
+                }
+            });
+        });
     }
 
     /// Continuous-scroll layout: every page centered in one column.
@@ -2032,8 +2073,9 @@ impl WarraqApp {
             .size_range(64.0..=400.0)
             .frame(egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(10, 4)))
             .show(ui, |ui| {
+                let s = self.s();
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("LOGS").size(10.0).color(theme::pal().faint).strong());
+                    ui.label(egui::RichText::new(lang::view(s.logs_title)).size(10.0).color(theme::pal().faint).strong());
                     if let Some(r) = &self.report {
                         ui.weak(format!("{} · {} error(s) · {} warning(s)", r.engine, r.errors.len(), r.warnings.len()));
                     }
@@ -2046,17 +2088,17 @@ impl WarraqApp {
                                 Some(l) => format!("l.{l}  {}", e.message),
                                 None => e.message.clone(),
                             };
-                            ui.label(egui::RichText::new(msg).color(theme::pal().error).size(11.5));
+                            ui.label(egui::RichText::new(lang::view(&msg)).color(theme::pal().error).size(11.5));
                         }
                         for w in &r.warnings {
-                            ui.label(egui::RichText::new(format!("warning: {}", w.message)).color(theme::pal().warn).size(11.5));
+                            ui.label(egui::RichText::new(lang::view(&format!("warning: {}", w.message))).color(theme::pal().warn).size(11.5));
                         }
                         if !r.log_tail.is_empty() {
                             ui.add_space(4.0);
                             ui.label(egui::RichText::new(&r.log_tail).monospace().size(10.5).color(theme::pal().muted));
                         }
                     } else {
-                        ui.weak("(no compile yet)");
+                        ui.weak(lang::view(s.logs_empty));
                     }
                 });
             });
@@ -2104,16 +2146,21 @@ impl WarraqApp {
 
     /// Modal: create a file or folder in the project tree.
     fn new_entry_modal(&mut self, ctx: &egui::Context) {
+        let s = self.s();
         let Some(entry) = &mut self.new_entry else { return };
-        let title = if entry.is_dir { "New folder" } else { "New file" };
+        let title = lang::view(if entry.is_dir { s.new_folder_title } else { s.new_file_title });
         let mut create = false;
         let mut cancel = false;
         egui::Window::new(title).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).show(ctx, |ui| {
-            ui.label(format!("in {}", entry.dir.display()));
-            ui.add(egui::TextEdit::singleline(&mut entry.name).hint_text(if entry.is_dir { "folder name" } else { "name.tex" }).desired_width(220.0));
+            ui.label(lang::fmt(s.in_dir, &[("dir", &entry.dir.display().to_string())]));
+            ui.add(
+                egui::TextEdit::singleline(&mut entry.name)
+                    .hint_text(if entry.is_dir { s.folder_name_hint } else { s.file_name_hint })
+                    .desired_width(220.0),
+            );
             ui.horizontal(|ui| {
-                create = ui.button("Create").clicked();
-                cancel = ui.button("Cancel").clicked();
+                create = ui.button(lang::view(s.create)).clicked();
+                cancel = ui.button(lang::view(s.cancel)).clicked();
             });
         });
         let entry = self.new_entry.take().unwrap_or_else(|| NewEntry { dir: PathBuf::new(), name: String::new(), is_dir: false });
@@ -2148,12 +2195,17 @@ impl WarraqApp {
             .ok()
             .and_then(|v| {
                 v["templates"].as_array().map(|a| {
+                    let lang = self.lang().code();
                     a.iter()
                         .map(|t| {
+                            // Localized name/desc override when the meta
+                            // ships one for the active UI language.
+                            let loc = &t["localized"][lang];
                             (
                                 t["id"].as_str().unwrap_or_default().to_string(),
-                                t["name"].as_str().unwrap_or_default().to_string(),
-                                t["desc"].as_str().unwrap_or_default().to_string(),
+                                loc["name"].as_str().filter(|n| !n.is_empty()).or_else(|| t["name"].as_str()).unwrap_or_default().to_string(),
+                                loc["desc"].as_str().filter(|d| !d.is_empty()).or_else(|| t["desc"].as_str()).unwrap_or_default().to_string(),
+                                t["lang"].as_str().unwrap_or_default().to_string(),
                             )
                         })
                         .collect()
@@ -2169,36 +2221,39 @@ impl WarraqApp {
         if !self.tpl_open {
             return;
         }
+        let s = self.s();
         let mut sel = self.tpl_sel;
         let mut create = false;
         let mut close = false;
-        egui::Window::new("New from template").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).show(
-            ctx,
-            |ui| {
+        egui::Window::new(lang::view(s.tpl_title))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
                 if self.tpls.is_empty() {
-                    ui.label(egui::RichText::new("no templates found").size(11.0).color(theme::pal().muted));
+                    ui.label(egui::RichText::new(lang::view(s.tpl_none)).size(11.0).color(theme::pal().muted));
                 }
                 egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                    for (i, (id, name, desc)) in self.tpls.iter().enumerate() {
-                        if ui.selectable_label(sel == Some(i), format!("{name}  ({id})")).clicked() {
+                    for (i, (id, name, desc, lang)) in self.tpls.iter().enumerate() {
+                        let badge = if lang.is_empty() { String::new() } else { format!("  [{lang}]") };
+                        if ui.selectable_label(sel == Some(i), lang::view(&format!("{name}  ({id}){badge}"))).clicked() {
                             sel = Some(i);
                             if self.tpl_name.is_empty() {
                                 self.tpl_name = format!("{id}.tex");
                             }
                         }
-                        ui.label(egui::RichText::new(desc).size(9.5).color(theme::pal().muted));
+                        ui.label(egui::RichText::new(lang::view(desc)).size(9.5).color(theme::pal().muted));
                     }
                 });
-                ui.add(egui::TextEdit::singleline(&mut self.tpl_name).hint_text("name.tex").desired_width(240.0));
+                ui.add(egui::TextEdit::singleline(&mut self.tpl_name).hint_text(s.file_name_hint).desired_width(240.0));
                 ui.horizontal(|ui| {
-                    create = ui.add_enabled(sel.is_some() && !self.tpl_name.trim().is_empty(), egui::Button::new("Create")).clicked();
-                    close = ui.button("Cancel").clicked();
+                    create = ui.add_enabled(sel.is_some() && !self.tpl_name.trim().is_empty(), egui::Button::new(lang::view(s.create))).clicked();
+                    close = ui.button(lang::view(s.cancel)).clicked();
                 });
-            },
-        );
+            });
         self.tpl_sel = sel;
         if create {
-            if let Some((id, _, _)) = self.tpl_sel.and_then(|i| self.tpls.get(i)) {
+            if let Some((id, _, _, _)) = self.tpl_sel.and_then(|i| self.tpls.get(i)) {
                 let path = self.project_root().join(self.tpl_name.trim());
                 match self.session.execute("template.new", &serde_json::json!({"id": id, "path": path.display().to_string()})) {
                     Ok(_) => {
@@ -2249,22 +2304,25 @@ impl WarraqApp {
         let mut snap = false;
         let mut restore: Option<String> = None;
         let mut close = false;
-        egui::Window::new("Local history").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).show(
-            ctx,
-            |ui| {
+        egui::Window::new(lang::view(self.s().hist_title))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let s = self.s();
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.hist_label).hint_text("label (optional)").desired_width(180.0));
-                    snap = ui.button("snapshot now").clicked();
+                    ui.add(egui::TextEdit::singleline(&mut self.hist_label).hint_text(s.hist_label_hint).desired_width(180.0));
+                    snap = ui.button(lang::view(s.snapshot_now)).clicked();
                 });
                 ui.separator();
                 if self.snaps.is_empty() {
-                    ui.label(egui::RichText::new("no snapshots yet").size(11.0).color(theme::pal().muted));
+                    ui.label(egui::RichText::new(lang::view(s.no_snapshots)).size(11.0).color(theme::pal().muted));
                 }
                 egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                     for (id, ts, label, files) in &self.snaps {
                         ui.horizontal(|ui| {
                             let confirming = self.hist_confirm.as_deref() == Some(id.as_str());
-                            if ui.selectable_label(confirming, "restore").clicked() {
+                            if ui.selectable_label(confirming, lang::view(s.restore)).clicked() {
                                 if confirming {
                                     restore = Some(id.clone());
                                 } else {
@@ -2272,17 +2330,20 @@ impl WarraqApp {
                                 }
                             }
                             if confirming {
-                                ui.label(egui::RichText::new("click again to overwrite the working tree").size(9.5).color(theme::pal().warn));
+                                ui.label(egui::RichText::new(lang::view(s.restore_confirm)).size(9.5).color(theme::pal().warn));
                             }
-                            let line = if label.is_empty() { format!("{ts}  ({files} files)") } else { format!("{ts}  {label}  ({files} files)") };
+                            let line = if label.is_empty() {
+                                format!("{ts}  ({})", lang::fmt(s.engine_files, &[("n", &files.to_string())]))
+                            } else {
+                                format!("{ts}  {}  ({})", lang::view(label), lang::fmt(s.engine_files, &[("n", &files.to_string())]))
+                            };
                             ui.label(egui::RichText::new(line).size(10.5));
                         });
                     }
                 });
                 ui.separator();
-                close = ui.button("Close").clicked();
-            },
-        );
+                close = ui.button(lang::view(s.close)).clicked();
+            });
         if snap {
             let label = self.hist_label.trim();
             match self.session.execute("project.snapshot", &serde_json::json!({"label": label})) {
@@ -2322,7 +2383,8 @@ impl WarraqApp {
             return;
         }
         let s = texparse::analyze(self.session.source());
-        egui::Window::new("Statistics")
+        let st = self.s();
+        egui::Window::new(lang::view(st.stats_title))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2330,19 +2392,19 @@ impl WarraqApp {
             .show(ctx, |ui| {
                 egui::Grid::new("stats_grid").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
                     for (label, v) in [
-                        ("words", s.words),
-                        ("characters", s.chars),
-                        ("chars (no spaces)", s.chars_no_space),
-                        ("lines", s.lines),
-                        ("commands", s.commands),
-                        ("inline math", s.math_inline),
-                        ("display math", s.math_display),
-                        ("environments", s.envs),
-                        ("sections", s.sections),
-                        ("labels", s.labels),
-                        ("citations", s.cites),
+                        (st.st_words, s.words),
+                        (st.st_chars, s.chars),
+                        (st.st_chars_ns, s.chars_no_space),
+                        (st.st_lines, s.lines),
+                        (st.st_commands, s.commands),
+                        (st.st_math_inline, s.math_inline),
+                        (st.st_math_display, s.math_display),
+                        (st.st_envs, s.envs),
+                        (st.st_sections, s.sections),
+                        (st.st_labels, s.labels),
+                        (st.st_cites, s.cites),
                     ] {
-                        ui.label(egui::RichText::new(label).size(11.5).color(theme::pal().muted));
+                        ui.label(egui::RichText::new(lang::view(label)).size(11.5).color(theme::pal().muted));
                         ui.label(egui::RichText::new(format!("{v}")).size(11.5).monospace());
                         ui.end_row();
                     }
@@ -2356,7 +2418,8 @@ impl WarraqApp {
         if !self.shortcuts_open {
             return;
         }
-        egui::Window::new("Keyboard shortcuts")
+        let s = self.s();
+        egui::Window::new(lang::view(s.shortcuts_title))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -2364,7 +2427,13 @@ impl WarraqApp {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                     for (group, rows) in SHORTCUTS {
-                        ui.label(egui::RichText::new(*group).size(10.0).color(theme::pal().faint));
+                        let group_label = match *group {
+                            "file" => s.sc_file,
+                            "editing" => s.sc_editing,
+                            "navigation" => s.sc_navigation,
+                            _ => s.sc_help,
+                        };
+                        ui.label(egui::RichText::new(lang::view(group_label)).size(10.0).color(theme::pal().faint));
                         egui::Grid::new(("keys", group)).num_columns(2).spacing([24.0, 3.0]).show(ui, |ui| {
                             for (keys, action) in *rows {
                                 ui.label(egui::RichText::new(*keys).size(11.5).monospace().color(theme::pal().accent_dim));
@@ -2389,37 +2458,38 @@ impl WarraqApp {
         let mut open = self.ai.open;
         let mut ask = false;
         let mut probe = false;
-        egui::Window::new("AI assist")
+        egui::Window::new(lang::view(self.s().ai_title))
             .collapsible(false)
             .resizable(true)
             .default_size([420.0, 340.0])
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .open(&mut open)
             .show(ctx, |ui| {
+                let s = self.s();
                 egui::Grid::new("ai_cfg").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-                    ui.label(egui::RichText::new("endpoint").size(11.0).color(theme::pal().muted));
+                    ui.label(egui::RichText::new(lang::view(s.ai_endpoint)).size(11.0).color(theme::pal().muted));
                     ui.add(egui::TextEdit::singleline(&mut self.ai.endpoint).hint_text("http://localhost:11434/v1").desired_width(300.0));
                     ui.end_row();
-                    ui.label(egui::RichText::new("model").size(11.0).color(theme::pal().muted));
+                    ui.label(egui::RichText::new(lang::view(s.ai_model)).size(11.0).color(theme::pal().muted));
                     ui.add(egui::TextEdit::singleline(&mut self.ai.model).hint_text("llama3.2, gpt-4o-mini, …").desired_width(300.0));
                     ui.end_row();
-                    ui.label(egui::RichText::new("token").size(11.0).color(theme::pal().muted));
-                    ui.add(egui::TextEdit::singleline(&mut self.ai.token).password(true).hint_text("optional — not saved").desired_width(300.0));
+                    ui.label(egui::RichText::new(lang::view(s.ai_token)).size(11.0).color(theme::pal().muted));
+                    ui.add(egui::TextEdit::singleline(&mut self.ai.token).password(true).hint_text(s.ai_token_hint).desired_width(300.0));
                     ui.end_row();
                 });
                 ui.horizontal(|ui| {
-                    probe = ui.button("test connection").clicked();
+                    probe = ui.button(lang::view(s.ai_test)).clicked();
                     if let Some((ok, label)) = &self.ai.status {
                         ui.label(egui::RichText::new(label).size(10.5).color(if *ok { theme::pal().accent_dim } else { theme::pal().error }));
                     }
                 });
                 ui.separator();
-                ui.label(egui::RichText::new("question (current document is sent as context)").size(10.5).color(theme::pal().muted));
+                ui.label(egui::RichText::new(lang::view(s.ai_question)).size(10.5).color(theme::pal().muted));
                 egui::ScrollArea::vertical().id_salt("ai_prompt").max_height(90.0).show(ui, |ui| {
                     ui.add(egui::TextEdit::multiline(&mut self.ai.prompt).desired_width(f32::INFINITY).desired_rows(3));
                 });
                 ui.horizontal(|ui| {
-                    ask = ui.add_enabled(!self.ai.busy && !self.ai.prompt.trim().is_empty(), egui::Button::new("ask")).clicked();
+                    ask = ui.add_enabled(!self.ai.busy && !self.ai.prompt.trim().is_empty(), egui::Button::new(lang::view(s.ai_ask))).clicked();
                     if self.ai.busy {
                         ui.spinner();
                     }
@@ -2592,7 +2662,7 @@ const ZOOM_PRESETS: &[f32] = &[0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 /// Keep in sync with `editor_shortcuts`, `ui`'s global keys, and the
 /// editor gestures (completion, SyncTeX click).
 const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
-    ("file", &[("Ctrl+S", "save"), ("🖨 (toolbar)", "print the PDF"), ("F12", "save a window screenshot")]),
+    ("file", &[("Ctrl+S", "save"), ("print button (toolbar)", "print the PDF"), ("F12", "save a window screenshot")]),
     (
         "editing",
         &[
@@ -2775,9 +2845,9 @@ fn filled_icon_button(
 
 /// Painted light/dark toggle — a sun in light mode, a crescent in dark
 /// (drawn geometry, so no icon font is needed).
-fn theme_toggle(ui: &mut egui::Ui) -> egui::Response {
+fn theme_toggle(ui: &mut egui::Ui, s: &lang::Strings) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 20.0), egui::Sense::click());
-    let resp = resp.on_hover_text(if theme::is_dark() { "switch to light theme" } else { "switch to dark theme" });
+    let resp = resp.on_hover_text(lang::view(if theme::is_dark() { s.theme_to_light } else { s.theme_to_dark }).into_owned());
     let p = ui.painter();
     let c = rect.center();
     let ink = if resp.hovered() { theme::pal().text } else { theme::pal().muted };
@@ -2855,7 +2925,7 @@ fn tree_row(ui: &mut egui::Ui, n: &files::Node, current: bool, is_main: bool, op
     painter.text(
         egui::pos2(x, rect.center().y),
         egui::Align2::LEFT_CENTER,
-        &n.name,
+        lang::view(&n.name),
         egui::FontId::proportional(11.5),
         if current { theme::pal().text } else { theme::pal().muted },
     );
@@ -2868,7 +2938,7 @@ fn tree_row(ui: &mut egui::Ui, n: &files::Node, current: bool, is_main: bool, op
             theme::pal().accent,
         );
     }
-    resp.on_hover_text(n.path.display().to_string())
+    resp.on_hover_text(lang::view(&n.path.display().to_string()).into_owned())
 }
 
 /// Cheap main-document probe: does this `.tex` contain `\documentclass`?
@@ -3069,7 +3139,7 @@ impl eframe::App for WarraqApp {
             self.hist_modal(&ctx);
             self.ai_modal(&ctx);
         }
-        if let Some(key) = self.cite.show(&ctx, theme::pal()) {
+        if let Some(key) = self.cite.show(&ctx, theme::pal(), self.s()) {
             let now = ctx.input(|i| i.time);
             self.insert_cite(&key, now);
         }

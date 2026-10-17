@@ -1,0 +1,5 @@
+name = "Arabic letter"
+name_ar = "رسالة عربية"
+desc = "Letter class in Arabic via polyglossia (xelatex/lualatex only)."
+desc_ar = "رسالة عربية عبر polyglossia (xelatex/lualatex فقط)."
+lang = "ar"

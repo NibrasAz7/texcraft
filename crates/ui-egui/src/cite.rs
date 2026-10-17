@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use crate::theme;
+use crate::{lang, theme};
 
 /// One bibliography row: a `@…{key, …}` entry and the file it came from.
 pub struct CiteEntry {
@@ -120,16 +120,19 @@ impl CiteDialog {
 
     /// Draw the window; returns the picked key (dialog closes on pick,
     /// Esc or the ✕ button).
-    pub fn show(&mut self, ctx: &egui::Context, pal: theme::Palette) -> Option<String> {
+    pub fn show(&mut self, ctx: &egui::Context, pal: theme::Palette, s: &lang::Strings) -> Option<String> {
         if !self.open {
             return None;
         }
         let mut open = self.open;
         let mut close = false;
         let mut picked: Option<String> = None;
-        egui::Window::new("cite").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).open(&mut open).show(
-            ctx,
-            |ui| {
+        egui::Window::new(lang::view(s.cite_title))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
                 // Arrows/Enter/Escape are consumed before the filter
                 // TextEdit runs — typed text still reaches it.
                 let mut nav = false;
@@ -153,12 +156,12 @@ impl CiteDialog {
 
                 // Per-file parse notes, kept subtle — entries still list.
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(format!("{} entries", self.entries.len())).size(9.5).color(pal.faint));
+                    ui.label(egui::RichText::new(lang::fmt(s.cite_entries, &[("n", &self.entries.len().to_string())])).size(9.5).color(pal.faint));
                     for (f, n) in self.issues.iter().take(3) {
                         ui.label(egui::RichText::new(format!("{f}: {n} issue(s)")).size(9.5).color(pal.muted));
                     }
                 });
-                let edit = ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("filter by key, author, title…").desired_width(400.0));
+                let edit = ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(s.cite_filter_hint).desired_width(400.0));
                 ui.memory_mut(|m| m.request_focus(edit.id));
                 if edit.changed() {
                     self.sel = 0;
@@ -184,16 +187,12 @@ impl CiteDialog {
                 egui::ScrollArea::vertical().id_salt("cite-list").max_height(300.0).auto_shrink([false, false]).show(ui, |ui| {
                     ui.set_min_width(400.0);
                     if self.entries.is_empty() {
-                        let msg = if cfg!(target_arch = "wasm32") {
-                            "bibliography scanning needs a local file"
-                        } else {
-                            "no .bib files found — save a refs.bib next to the document"
-                        };
-                        ui.label(egui::RichText::new(msg).size(11.0).color(pal.muted));
+                        let msg = if cfg!(target_arch = "wasm32") { s.cite_no_bib_wasm } else { s.cite_no_bib };
+                        ui.label(egui::RichText::new(lang::view(msg)).size(11.0).color(pal.muted));
                         return;
                     }
                     if matches.is_empty() {
-                        ui.label(egui::RichText::new("(no matches)").size(11.0).color(pal.muted));
+                        ui.label(egui::RichText::new(lang::view(s.cite_empty)).size(11.0).color(pal.muted));
                     }
                     for (row, &ei) in matches.iter().take(MAX_ROWS).enumerate() {
                         let Some(e) = self.entries.get(ei) else { continue };
@@ -211,7 +210,7 @@ impl CiteDialog {
                             detail.push_str(&format!("({})", e.year));
                         }
                         let label = if detail.is_empty() { e.key.clone() } else { format!("{} — {detail}", e.key) };
-                        let resp = ui.selectable_label(row == self.sel, egui::RichText::new(label).size(11.5)).on_hover_text(&e.file);
+                        let resp = ui.selectable_label(row == self.sel, egui::RichText::new(lang::view(&label)).size(11.5)).on_hover_text(&e.file);
                         if nav && row == self.sel {
                             resp.scroll_to_me(Some(egui::Align::Center));
                         }
@@ -223,15 +222,15 @@ impl CiteDialog {
                         ui.label(egui::RichText::new(format!("… {} more — keep typing", matches.len() - MAX_ROWS)).size(10.0).color(pal.faint));
                     }
                 });
-            },
-        );
+            });
         self.open = open && !close && picked.is_none();
         picked
     }
 }
 
 /// The top-bar "cite" button: a tiny open-book glyph plus the label.
-pub fn cite_button(ui: &mut egui::Ui) -> egui::Response {
+/// `label` is already display-shaped by the caller.
+pub fn cite_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(44.0, 20.0), egui::Sense::click());
     let resp = resp.on_hover_text("insert citation — Ctrl+Shift+C");
     let p = ui.painter();
@@ -239,12 +238,19 @@ pub fn cite_button(ui: &mut egui::Ui) -> egui::Response {
     let cy = rect.center().y;
     let bx = rect.left() + 3.0;
     let stroke = egui::Stroke::new(1.0, ink);
-    // Open book: two page outlines sharing a spine.
-    let left = egui::Rect::from_min_max(egui::pos2(bx, cy - 4.0), egui::pos2(bx + 5.0, cy + 4.0));
-    let right = egui::Rect::from_min_max(egui::pos2(bx + 6.0, cy - 4.0), egui::pos2(bx + 11.0, cy + 4.0));
-    p.rect_stroke(left, 1.0, stroke, egui::StrokeKind::Inside);
-    p.rect_stroke(right, 1.0, stroke, egui::StrokeKind::Inside);
-    p.text(egui::pos2(bx + 15.0, cy), egui::Align2::LEFT_CENTER, "cite", egui::FontId::proportional(11.5), ink);
+    // Open book: two angled pages dipping toward a centre spine.
+    let cx = bx + 6.0;
+    let (top, bot) = (cy - 4.5, cy + 4.0);
+    let outer_top = top + 1.5;
+    let (lx, rx) = (bx, bx + 12.0);
+    p.line_segment([egui::pos2(lx, outer_top), egui::pos2(cx, top)], stroke);
+    p.line_segment([egui::pos2(lx, outer_top), egui::pos2(lx, bot - 1.5)], stroke);
+    p.line_segment([egui::pos2(lx, bot - 1.5), egui::pos2(cx, bot)], stroke);
+    p.line_segment([egui::pos2(cx, top), egui::pos2(rx, outer_top)], stroke);
+    p.line_segment([egui::pos2(rx, outer_top), egui::pos2(rx, bot - 1.5)], stroke);
+    p.line_segment([egui::pos2(rx, bot - 1.5), egui::pos2(cx, bot)], stroke);
+    p.line_segment([egui::pos2(cx, top), egui::pos2(cx, bot)], stroke);
+    p.text(egui::pos2(bx + 16.0, cy), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(11.5), ink);
     resp
 }
 

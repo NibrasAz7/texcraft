@@ -1,2 +1,5 @@
 name = "Report"
+name_ar = "تقرير"
 desc = "Report class with title page, table of contents and two chapters."
+desc_ar = "تقرير مع صفحة عنوان وفهرس وفصلين."
+lang = "en"

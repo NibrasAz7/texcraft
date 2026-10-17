@@ -1,2 +1,5 @@
 name = "Letter"
+name_ar = "رسالة"
 desc = "Standard letter with sender address, opening and closing."
+desc_ar = "رسالة قياسية مع عنوان المرسل وتحية وخاتمة."
+lang = "en"

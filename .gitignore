@@ -17,3 +17,6 @@ bin/
 
 # Hunspell dictionaries (fetch via scripts/fetch-dict.ps1)
 dicts/
+
+# UI fonts — Amiri et al. (fetch via scripts/fetch-fonts.ps1)
+fonts/

@@ -1,0 +1,26 @@
+% WarraqCraft template: Arabic letter via polyglossia.
+% Compile with xelatex or lualatex — pdflatex cannot shape Arabic.
+% Requires an Arabic OpenType font — Amiri by default.
+% !TeX program = xelatex
+\documentclass[12pt]{letter}
+
+\usepackage{polyglossia}
+\setmainlanguage{arabic}
+\setotherlanguage{english}
+\newfontfamily\arabicfont[Script=Arabic]{Amiri}
+
+\address{شارع المثال ١٢٣\\المدينة}
+\signature{اسمك}
+
+\begin{document}
+
+\begin{letter}{اسم المستلم\\عنوانه\\المدينة}
+\opening{السيد الفاضل،}
+
+نص الرسالة هنا. اكتب ما تشاء — يدعم \textenglish{LaTeX} النص العربي
+واللاتيني في السطر الواحد.
+
+\closing{مع خالص التحية،}
+\end{letter}
+
+\end{document}
