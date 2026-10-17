@@ -892,7 +892,7 @@ impl WarraqApp {
                 ui.set_max_width(420.0);
                 for (i, item) in c.items.iter().enumerate() {
                     let label = if c.env { format!("{}   {}", item.name, item.sig) } else { format!("\\{}   {}", item.name, item.sig) };
-                    let resp = ui.selectable_label(i == c.sel, egui::RichText::new(label).monospace().size(11.5));
+                    let resp = ui.selectable_label(i == c.sel, egui::RichText::new(lang::view(&label)).monospace().size(11.5));
                     ui.label(egui::RichText::new(item.meta.clone()).size(9.5).color(theme::pal().muted));
                     if resp.clicked() {
                         accept = true;
@@ -1950,8 +1950,8 @@ impl WarraqApp {
                     ui.label(egui::RichText::new(s.tex_badge).size(10.5).color(theme::pal().syn_cmd).strong());
                     ui.separator();
                     let n = self.doc.issues.len();
-                    let msg = if n == 0 { s.issues_none.to_string() } else { lang::fmt(s.issues_many, &[("n", &n.to_string())]) };
-                    ui.label(egui::RichText::new(lang::view(&msg)).size(10.5).color(if n == 0 { theme::pal().muted } else { theme::pal().warn }));
+                    let msg = if n == 0 { lang::view(s.issues_none).into_owned() } else { lang::fmt(s.issues_many, &[("n", &n.to_string())]) };
+                    ui.label(egui::RichText::new(msg).size(10.5).color(if n == 0 { theme::pal().muted } else { theme::pal().warn }));
                     if !self.folded.is_empty() {
                         ui.separator();
                         ui.label(egui::RichText::new(lang::view(s.folded_warn)).size(10.5).color(theme::pal().warn));
@@ -2053,7 +2053,7 @@ impl WarraqApp {
                     ui.painter().text(
                         area.center(),
                         egui::Align2::CENTER_CENTER,
-                        if self.compiling { "compiling…" } else { "no PDF yet — press Recompile" },
+                        lang::view(if self.compiling { s.compiling } else { s.no_pdf }).as_ref(),
                         egui::FontId::proportional(13.0),
                         theme::pal().faint,
                     );
