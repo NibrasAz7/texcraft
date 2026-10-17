@@ -230,9 +230,6 @@ pub fn math_at(src: &str, ci: usize) -> Option<String> {
 
 /// The `$…$`-style span (byte range incl. delimiters) around `ci` —
 /// for highlighting the previewed region.
-// Wired to the region-highlight call site in a later wave; keep the
-// gate quiet whichever way the module is declared.
-#[allow(dead_code)]
 pub fn math_span(src: &str, ci: usize) -> Option<(usize, usize)> {
     enclosing(src, ci).map(|(l, h, _, _)| (l, h))
 }

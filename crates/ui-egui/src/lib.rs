@@ -11,6 +11,9 @@
 
 mod ai;
 mod cite;
+/// Opt-in TCP control channel (`texcraft --control FILE`, native only).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod control;
 mod edits;
 mod files;
 mod fold;
@@ -314,6 +317,9 @@ pub struct TexApp {
     /// blocks on the spooler).
     #[cfg(not(target_arch = "wasm32"))]
     print_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// Opt-in `--control FILE` TCP channel, polled in `logic`.
+    #[cfg(not(target_arch = "wasm32"))]
+    control: Option<control::Control>,
 }
 const AUTOCOMPILE_IDLE_SECS: f64 = 5.0;
 
@@ -384,6 +390,8 @@ impl TexApp {
             mathprev: mathprev::MathPreview::new(),
             #[cfg(not(target_arch = "wasm32"))]
             print_rx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            control: None,
         };
         // Restore the non-theme prefs (theme applied above).
         let p = app.settings.get().clone();
@@ -409,6 +417,16 @@ impl TexApp {
             None => app.reparse(),
         }
         app
+    }
+
+    /// Attach a started control channel (`texcraft --control FILE`).
+    /// `ctx` lets connection threads wake the UI so a reply doesn't
+    /// wait for the next input event.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_control(&mut self, ctx: &egui::Context, c: control::Control) {
+        let mut c = c;
+        c.wake_on(ctx.clone());
+        self.control = Some(c);
     }
 
     fn reparse(&mut self) {
@@ -2541,6 +2559,9 @@ impl eframe::App for TexApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Some(c) = &self.control {
+                c.poll(&mut self.session);
+            }
             self.poll_compile(ctx);
             self.poll_tool(ctx);
             self.poll_print();

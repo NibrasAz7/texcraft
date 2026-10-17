@@ -113,3 +113,15 @@ widget) are tracked there — nothing in M0 depends on them.
   * ui-egui `mirrors.rs` + `ai.rs` — Ctrl+M occurrence-mirror editing
     (bounded multi-caret), BYO-endpoint AI panel (craft-ai, native-only;
     token never persisted); 🖨 print via craft-print; Stats window.
+- M2 — control surface (headless reachability for all engine commands):
+  * `crates/mcp` (new, L6) — opt-in stdio MCP server (NDJSON JSON-RPC,
+    no port): initialize/ping/tools·list/tools·call/resources; 21 tools
+    map 1:1 to Session::execute; read-only texcraft://doc/* resources;
+    >4 MiB lines capped. `texcraft-cli mcp` launches it.
+  * `texcraft-cli cmd`/`--cmd` — generic engine passthrough
+    (--file/--params/--check) + `commands` listing.
+  * `--control FILE` — opt-in loopback TCP channel on the GUI: 128-bit
+    token in an owner-only control file (staged write, no symlink
+    follow), per-request-token NDJSON requests drained through
+    logic(), oneshot replies, 64 in-flight cap. Client:
+    `texcraft-cli ui --control FILE <cmd> [--params]`.

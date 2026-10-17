@@ -20,6 +20,7 @@ unreachable = "deny"
 unsafe_code = "forbid"
 
 [workspace.dependencies]
+serde_json = "1"
 # Shared Craft-family libraries (storytold/craft-libs), pinned like the
 # sibling workspaces (matcraft, ProjectsCraft, reportcraft).
 craft-atomic = { git = "https://github.com/storytold/craft-libs", rev = "457a078809690994b22debdffb703ff36d3129df" }

@@ -1,0 +1,17 @@
+[package]
+name = "texcraft-mcp"
+description = "TexCraft MCP server (L6): opt-in stdio Model Context Protocol over the engine Session."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "texcraft_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+texcraft-engine = { path = "../engine" }
+serde_json.workspace = true

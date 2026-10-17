@@ -3540,7 +3540,9 @@ dependencies = [
 name = "texcraft-cli"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "texcraft-engine",
+ "texcraft-mcp",
  "texparse",
 ]
 
@@ -3551,6 +3553,14 @@ dependencies = [
  "craft-atomic",
  "serde_json",
  "texparse",
+]
+
+[[package]]
+name = "texcraft-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "texcraft-engine",
 ]
 
 [[package]]

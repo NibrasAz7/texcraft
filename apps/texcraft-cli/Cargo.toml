@@ -13,5 +13,7 @@ name = "texcraft-cli"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = "1"
 texparse = { path = "../../crates/texparse" }
 texcraft-engine = { path = "../../crates/engine" }
+texcraft-mcp = { path = "../../crates/mcp" }

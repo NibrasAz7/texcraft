@@ -1,0 +1,676 @@
+//! TexCraft MCP server (L6): Model Context Protocol over the engine
+//! [`Session`].
+//!
+//! **Opt-in only.** Nothing in TexCraft starts this server on its own: it
+//! runs when a user (or an agent the user configured) launches it, and it
+//! never opens a network port — the transport is newline-delimited JSON-RPC
+//! 2.0 (NDJSON) over stdin/stdout, one message per line.
+//!
+//! Implemented: `initialize`, `ping`, `tools/list`, `tools/call`,
+//! `resources/list`, `resources/templates/list`, `resources/read`, and the
+//! `notifications/*` a client sends (never answered). Each `tools/call` tool
+//! maps one-to-one onto a [`Session::execute`] command; engine failures are
+//! reported inside the result (`isError: true`) so the agent can read them,
+//! while protocol failures use JSON-RPC error codes. The open document is
+//! also exposed read-only as `texcraft://doc/source`,
+//! `texcraft://doc/structure` and `texcraft://doc/stats`.
+//!
+//! Input is untrusted: lines are capped at 4 MiB (longer ones get a parse
+//! error and are drained), malformed JSON is a `-32700` reply, and no code
+//! path panics.
+#![forbid(unsafe_code)]
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+use std::io::{self, BufRead, Read, Write};
+
+use serde_json::{json, Value};
+use texcraft_engine::Session;
+
+/// Protocol revisions we speak, newest first.
+pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// A single NDJSON line is capped at 4 MiB; anything longer is answered
+/// with a parse error and drained, never buffered whole.
+const MAX_LINE: usize = 4 * 1024 * 1024;
+/// Chunk size for draining the rest of an over-long line.
+const DRAIN_CHUNK: u64 = 64 * 1024;
+
+const PARSE_ERROR: i64 = -32700;
+const INVALID_REQUEST: i64 = -32600;
+const METHOD_NOT_FOUND: i64 = -32601;
+const INVALID_PARAMS: i64 = -32602;
+const INTERNAL_ERROR: i64 = -32603;
+
+const SOURCE_URI: &str = "texcraft://doc/source";
+const STRUCTURE_URI: &str = "texcraft://doc/structure";
+const STATS_URI: &str = "texcraft://doc/stats";
+
+const INSTRUCTIONS: &str = "TexCraft edits LaTeX documents. Open a .tex file with document_open or set the buffer directly \
+with source_set, then run the tools: source_get, structure_get and magic_get inspect the buffer, document_compile typesets \
+it with tectonic or a system TeX engine, math_preview renders a math fragment, text_stats reports document statistics, \
+template_* create documents from the shipped gallery, user_tool_* run configured external tools, and \
+project_snapshot/snapshot_* keep local file history. The open document is also readable as resources \
+texcraft://doc/source (text/plain), texcraft://doc/structure and texcraft://doc/stats (application/json) — read-only \
+snapshots of the live buffer.";
+
+/// MCP tool name → engine command id. The two tables stay in sync — a test
+/// pins the count and the name set.
+const TOOL_COMMANDS: &[(&str, &str)] = &[
+    ("document_open", "document.open"),
+    ("document_save", "document.save"),
+    ("document_compile", "document.compile"),
+    ("source_set", "source.set"),
+    ("source_get", "source.get"),
+    ("structure_get", "structure.get"),
+    ("magic_get", "magic.get"),
+    ("user_tool_list", "user_tool.list"),
+    ("user_tool_set", "user_tool.set"),
+    ("user_tool_run", "user_tool.run"),
+    ("user_tool_clear", "user_tool.clear"),
+    ("template_list", "template.list"),
+    ("template_read", "template.read"),
+    ("template_new", "template.new"),
+    ("project_graph", "project.graph"),
+    ("math_preview", "math.preview"),
+    ("text_stats", "text.stats"),
+    ("project_snapshot", "project.snapshot"),
+    ("snapshot_list", "snapshot.list"),
+    ("snapshot_read", "snapshot.read"),
+    ("snapshot_restore", "snapshot.restore"),
+];
+
+/// The stdio MCP server: one engine [`Session`] behind a line loop.
+pub struct McpServer {
+    session: Session,
+}
+
+impl Default for McpServer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl McpServer {
+    /// Server over a fresh, empty session.
+    pub fn new() -> Self {
+        Self { session: Session::new() }
+    }
+
+    /// Server over an existing session (e.g. an already-open document).
+    pub fn with_session(session: Session) -> Self {
+        Self { session }
+    }
+
+    /// The underlying engine session.
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    /// The underlying engine session, mutably.
+    pub fn session_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+
+    /// Serve newline-delimited JSON-RPC until `input` reaches end of file.
+    /// Empty lines are skipped. A line over [`MAX_LINE`] bytes is answered
+    /// with a parse error and its remainder is drained in bounded chunks —
+    /// a hostile peer cannot make the server buffer an unbounded line.
+    pub fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            buf.clear();
+            let n = input.by_ref().take(MAX_LINE as u64 + 1).read_until(b'\n', &mut buf)?;
+            if n == 0 {
+                return Ok(());
+            }
+            // Line length without the trailing newline is what counts.
+            let content_len = buf.len().saturating_sub(usize::from(buf.last() == Some(&b'\n')));
+            if content_len > MAX_LINE {
+                drain_line(&mut input)?;
+                let reply = error(Value::Null, PARSE_ERROR, "line exceeds the 4 MiB limit");
+                writeln!(output, "{reply}")?;
+                output.flush()?;
+                continue;
+            }
+            let line = String::from_utf8_lossy(&buf);
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Some(reply) = self.handle_line(&line) {
+                writeln!(output, "{reply}")?;
+                output.flush()?;
+            }
+        }
+    }
+
+    /// Handle one NDJSON line; returns the serialized reply, if one is due.
+    /// Pure dispatch — unit-testable without I/O.
+    pub fn handle_line(&mut self, line: &str) -> Option<String> {
+        let reply = match serde_json::from_str::<Value>(line) {
+            Ok(msg) => self.handle(&msg),
+            Err(e) => Some(error(Value::Null, PARSE_ERROR, &format!("parse error: {e}"))),
+        };
+        reply.map(|r| r.to_string())
+    }
+
+    /// Handle one parsed message. Notifications (no `id`) and
+    /// `notifications/*` get no reply.
+    pub fn handle(&mut self, msg: &Value) -> Option<Value> {
+        let Some(obj) = msg.as_object() else {
+            return Some(error(Value::Null, INVALID_REQUEST, "expected a JSON-RPC request object"));
+        };
+        let id = obj.get("id").cloned();
+        let Some(method) = obj.get("method").and_then(Value::as_str) else {
+            // A response to something we sent (we send no requests) or garbage.
+            return id.map(|id| error(id, INVALID_REQUEST, "missing method"));
+        };
+        if method.starts_with("notifications/") {
+            return None;
+        }
+        let params = obj.get("params").cloned().unwrap_or(Value::Null);
+        let id = id?; // requests only — a message without id is a notification
+        Some(match self.dispatch(method, &params) {
+            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+            Err((code, message)) => error(id, code, &message),
+        })
+    }
+
+    fn dispatch(&mut self, method: &str, params: &Value) -> Result<Value, (i64, String)> {
+        match method {
+            "initialize" => {
+                let asked = params.get("protocolVersion").and_then(Value::as_str);
+                let version = match asked {
+                    Some(v) if PROTOCOL_VERSIONS.contains(&v) => v,
+                    _ => PROTOCOL_VERSIONS.first().copied().unwrap_or("2025-06-18"),
+                };
+                Ok(json!({
+                    "protocolVersion": version,
+                    "capabilities": { "tools": {}, "resources": {} },
+                    "serverInfo": { "name": "texcraft", "title": "TexCraft", "version": env!("CARGO_PKG_VERSION") },
+                    "instructions": INSTRUCTIONS,
+                }))
+            }
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(json!({ "tools": tool_list() })),
+            "tools/call" => self.call_tool(params),
+            "resources/list" => Ok(json!({ "resources": self.resource_list() })),
+            "resources/templates/list" => Ok(json!({ "resourceTemplates": resource_templates() })),
+            "resources/read" => self.read_resource(params),
+            other => Err((METHOD_NOT_FOUND, format!("method not found: {other}"))),
+        }
+    }
+
+    /// `tools/call`: map the tool name to its engine command and run it.
+    /// Engine errors land in the result (`isError: true`); protocol-level
+    /// problems (missing name, unknown tool) are JSON-RPC errors.
+    fn call_tool(&mut self, params: &Value) -> Result<Value, (i64, String)> {
+        let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "tools/call needs a tool name".to_string()))?;
+        let Some((_, command)) = TOOL_COMMANDS.iter().find(|(n, _)| *n == name) else {
+            return Err((INVALID_PARAMS, format!("unknown tool '{name}'")));
+        };
+        let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+        match self.session.execute(command, &args) {
+            Ok(result) => {
+                let text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+                Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": false }))
+            }
+            Err(e) => Ok(json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true })),
+        }
+    }
+
+    /// `resources/list`: the three document resources while the session
+    /// holds a document (a path or any buffer text), an empty list otherwise.
+    fn resource_list(&self) -> Vec<Value> {
+        if self.session.path().is_none() && self.session.source().is_empty() {
+            return Vec::new();
+        }
+        vec![
+            json!({ "uri": SOURCE_URI, "name": "Document source", "mimeType": "text/plain" }),
+            json!({ "uri": STRUCTURE_URI, "name": "Document structure", "mimeType": "application/json" }),
+            json!({ "uri": STATS_URI, "name": "Document statistics", "mimeType": "application/json" }),
+        ]
+    }
+
+    /// `resources/read`: the live buffer, its structure, or its statistics.
+    fn read_resource(&mut self, params: &Value) -> Result<Value, (i64, String)> {
+        let uri = params.get("uri").and_then(Value::as_str).ok_or((INVALID_PARAMS, "resources/read needs a uri".to_string()))?;
+        let (command, mime, json_text) = match uri {
+            SOURCE_URI => ("source.get", "text/plain", false),
+            STRUCTURE_URI => ("structure.get", "application/json", true),
+            STATS_URI => ("text.stats", "application/json", true),
+            _ => return Err((INVALID_PARAMS, format!("unknown resource uri '{uri}'"))),
+        };
+        let result = self.session.execute(command, &json!({})).map_err(|e| (INTERNAL_ERROR, e.to_string()))?;
+        let text = if json_text {
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+        } else {
+            result.get("text").and_then(Value::as_str).unwrap_or_default().to_string()
+        };
+        Ok(json!({ "contents": [{ "uri": uri, "mimeType": mime, "text": text }] }))
+    }
+}
+
+/// Consume the rest of an over-long line in bounded chunks so the next read
+/// resynchronises at a newline (or EOF).
+fn drain_line(input: &mut impl BufRead) -> io::Result<()> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        let n = input.by_ref().take(DRAIN_CHUNK).read_until(b'\n', &mut buf)?;
+        if n == 0 || buf.last() == Some(&b'\n') {
+            return Ok(());
+        }
+    }
+}
+
+/// A JSON-RPC error response.
+fn error(id: Value, code: i64, message: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// The same three URIs as `resources/templates/list` entries.
+fn resource_templates() -> Value {
+    json!([
+        { "uriTemplate": SOURCE_URI, "name": "Document source", "mimeType": "text/plain",
+          "description": "The current LaTeX source buffer, as text." },
+        { "uriTemplate": STRUCTURE_URI, "name": "Document structure", "mimeType": "application/json",
+          "description": "The parsed structure of the open document (as structure_get)." },
+        { "uriTemplate": STATS_URI, "name": "Document statistics", "mimeType": "application/json",
+          "description": "Word/character counts and structural tallies of the open document (as text_stats)." },
+    ])
+}
+
+/// One `tools/list` entry.
+fn tool(name: &str, description: &str, properties: Value, required: &[&str], read_only: bool, destructive: bool) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false,
+        },
+        "annotations": { "readOnlyHint": read_only, "destructiveHint": destructive },
+    })
+}
+
+/// A `{"type":"string"}` schema property with a description.
+fn s(desc: &str) -> Value {
+    json!({ "type": "string", "description": desc })
+}
+
+/// The `tools/list` table: one tool per engine command.
+fn tool_list() -> Vec<Value> {
+    vec![
+        tool(
+            "document_open",
+            "Open a .tex file into the session (replaces the current buffer — save first with document_save if needed).",
+            json!({ "path": s("Path of the .tex file to open.") }),
+            &["path"],
+            false,
+            false,
+        ),
+        tool(
+            "document_save",
+            "Write the buffer to its file, or to the given path (overwrites the file on disk).",
+            json!({ "path": s("Optional new path to save to.") }),
+            &[],
+            false,
+            true,
+        ),
+        tool(
+            "document_compile",
+            "Save if dirty, then compile with tectonic or a system TeX engine into .texcraft/ next to the document.",
+            json!({}),
+            &[],
+            false,
+            true,
+        ),
+        tool(
+            "source_set",
+            "Replace the document's LaTeX source buffer.",
+            json!({ "text": s("The full LaTeX source text.") }),
+            &["text"],
+            false,
+            false,
+        ),
+        tool("source_get", "Return the current LaTeX source buffer.", json!({}), &[], true, false),
+        tool(
+            "structure_get",
+            "Return the parsed document structure (class, packages, headings, labels, citations, issues).",
+            json!({}),
+            &[],
+            true,
+            false,
+        ),
+        tool(
+            "magic_get",
+            "Return the buffer's % !TeX / % !BIB header directives (engine, root, encoding, spellcheck hints).",
+            json!({}),
+            &[],
+            true,
+            false,
+        ),
+        tool("user_tool_list", "List the configured TeXstudio-style user tools.", json!({}), &[], true, false),
+        tool(
+            "user_tool_set",
+            "Replace the user-tool list; each entry has name, argv (array), and optional cwd and capture.",
+            json!({ "tools": { "type": "array", "description": "User tools: {name, argv: [..], cwd?, capture?}." } }),
+            &["tools"],
+            false,
+            false,
+        ),
+        tool(
+            "user_tool_run",
+            "Run a configured user tool by name, or a one-shot inline tool given argv; capture=false detaches it (background).",
+            json!({
+                "name": s("Name of a configured user tool."),
+                "argv": { "type": "array", "items": { "type": "string" }, "description": "Inline one-shot command argv (fixed argv, no shell)." },
+                "cwd": s("Working directory override."),
+                "capture": { "type": "boolean", "description": "Capture output (default true); false runs detached." },
+                "timeout_s": { "type": "integer", "description": "Timeout in seconds, clamped 1-300 (default 60)." },
+            }),
+            &[],
+            false,
+            true,
+        ),
+        tool("user_tool_clear", "Remove all configured user tools.", json!({}), &[], false, false),
+        tool("template_list", "List the shipped document templates.", json!({}), &[], true, false),
+        tool("template_read", "Read one template's LaTeX source by id.", json!({ "id": s("Template id from template_list.") }), &["id"], true, false),
+        tool(
+            "template_new",
+            "Create a new .tex file from a template (writes to disk; refuses to overwrite unless force is true).",
+            json!({
+                "id": s("Template id from template_list."),
+                "path": s("Destination file path."),
+                "force": { "type": "boolean", "description": "Overwrite an existing file (default false)." },
+            }),
+            &["id", "path"],
+            false,
+            true,
+        ),
+        tool(
+            "project_graph",
+            "Return the reachable file graph of the open document (sources, resources, unresolved deps).",
+            json!({}),
+            &[],
+            true,
+            false,
+        ),
+        tool(
+            "math_preview",
+            "Compile a LaTeX math fragment to a preview PDF under .texcraft/preview/.",
+            json!({ "latex": s("The LaTeX math fragment to render.") }),
+            &["latex"],
+            true,
+            false,
+        ),
+        tool(
+            "text_stats",
+            "Document statistics: word/character/line counts and structural tallies.",
+            json!({ "source": s("Optional text to analyse instead of the buffer.") }),
+            &[],
+            true,
+            false,
+        ),
+        tool(
+            "project_snapshot",
+            "Snapshot the project's source files under .texcraft/snapshots/ (writes to disk).",
+            json!({ "label": s("Optional snapshot label.") }),
+            &[],
+            false,
+            true,
+        ),
+        tool("snapshot_list", "List saved snapshots, newest first.", json!({}), &[], true, false),
+        tool("snapshot_read", "Read the files stored in one snapshot.", json!({ "id": s("Snapshot id from snapshot_list.") }), &["id"], true, false),
+        tool(
+            "snapshot_restore",
+            "Restore a snapshot: overwrites working-tree files with the snapshot's copies — requires confirm: true.",
+            json!({
+                "id": s("Snapshot id from snapshot_list."),
+                "confirm": { "type": "boolean", "description": "Must be true: restoring overwrites working-tree files." },
+            }),
+            &["id", "confirm"],
+            false,
+            true,
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One JSON-RPC line in, the parsed reply out (or `None`).
+    fn rpc(server: &mut McpServer, msg: &Value) -> Option<Value> {
+        let reply = server.handle_line(&msg.to_string())?;
+        Some(serde_json::from_str(&reply).unwrap())
+    }
+
+    fn call(server: &mut McpServer, id: u64, name: &str, arguments: Value) -> Value {
+        rpc(server, &json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": name, "arguments": arguments}})).unwrap()
+    }
+
+    /// The text payload of a successful tool result, parsed back to JSON.
+    fn tool_json(reply: &Value) -> Value {
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn initialize_handshake() {
+        let mut s = McpServer::new();
+        // Supported version is echoed back.
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}})).unwrap();
+        assert_eq!(r["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(r["result"]["serverInfo"]["name"], "texcraft");
+        assert_eq!(r["result"]["serverInfo"]["title"], "TexCraft");
+        assert!(r["result"]["capabilities"]["tools"].is_object());
+        assert!(r["result"]["capabilities"]["resources"].is_object());
+        let instructions = r["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains("document_open") && instructions.contains("texcraft://doc/source"));
+        // Unknown/absent version → newest supported.
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}})).unwrap();
+        assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 3, "method": "initialize"})).unwrap();
+        assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn ping_and_notifications() {
+        let mut s = McpServer::new();
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 1, "method": "ping"})).unwrap();
+        assert_eq!(r["result"], json!({}));
+        // Notifications never get a reply.
+        assert!(rpc(&mut s, &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).is_none());
+        assert!(rpc(&mut s, &json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"id": 1}})).is_none());
+        // Any message without an id is a notification — even a known method.
+        assert!(rpc(&mut s, &json!({"jsonrpc": "2.0", "method": "ping"})).is_none());
+        // A notifications/* method with an id still gets no reply.
+        assert!(rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 9, "method": "notifications/progress"})).is_none());
+    }
+
+    #[test]
+    fn tools_list_covers_every_command() {
+        let mut s = McpServer::new();
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).unwrap();
+        let tools = r["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 21);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for (name, _) in TOOL_COMMANDS {
+            assert!(names.contains(name), "tools/list missing {name}");
+        }
+        for t in tools {
+            assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()), "no description: {t}");
+            assert_eq!(t["inputSchema"]["type"], "object");
+            assert!(t["inputSchema"]["properties"].is_object());
+            assert!(t["inputSchema"]["required"].is_array());
+            assert!(t["annotations"]["readOnlyHint"].is_boolean());
+            assert!(t["annotations"]["destructiveHint"].is_boolean());
+        }
+        // Spot-check the required fields.
+        let find = |n: &str| tools.iter().find(|t| t["name"] == n).unwrap().clone();
+        assert_eq!(find("document_open")["inputSchema"]["required"], json!(["path"]));
+        assert_eq!(find("snapshot_restore")["inputSchema"]["required"], json!(["id", "confirm"]));
+        assert_eq!(find("snapshot_restore")["annotations"]["destructiveHint"], true);
+        assert!(find("snapshot_restore")["description"].as_str().unwrap().contains("overwrites"));
+        assert_eq!(find("source_get")["annotations"], json!({"readOnlyHint": true, "destructiveHint": false}));
+    }
+
+    #[test]
+    fn tools_call_round_trip() {
+        let mut s = McpServer::new();
+        let r = call(&mut s, 1, "source_set", json!({"text": "\\documentclass{article}\nHi."}));
+        assert_eq!(r["result"]["isError"], false);
+        let r = call(&mut s, 2, "source_get", json!({}));
+        assert_eq!(r["result"]["isError"], false);
+        assert_eq!(tool_json(&r)["text"], "\\documentclass{article}\nHi.");
+        // Arguments are optional for parameterless tools.
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "structure_get"}})).unwrap();
+        assert_eq!(r["result"]["isError"], false);
+        assert_eq!(tool_json(&r)["class"], "article");
+    }
+
+    #[test]
+    fn tool_errors_are_results_not_protocol_errors() {
+        let mut s = McpServer::new();
+        // Missing required param → engine BadParam → isError content.
+        let r = call(&mut s, 1, "document_open", json!({}));
+        assert_eq!(r["result"]["isError"], true);
+        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("path"));
+        // Engine-level failure (no such file) → isError, server keeps going.
+        let r = call(&mut s, 2, "document_open", json!({"path": "no/such/file-xyz.tex"}));
+        assert_eq!(r["result"]["isError"], true);
+        // Unknown tool → -32602 protocol error.
+        let r = call(&mut s, 3, "no_such_tool", json!({}));
+        assert_eq!(r["error"]["code"], -32602);
+        // Missing tool name → -32602.
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {}})).unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        // And the session still works afterwards.
+        let r = call(&mut s, 5, "source_set", json!({"text": "x"}));
+        assert_eq!(r["result"]["isError"], false);
+    }
+
+    #[test]
+    fn protocol_error_shapes() {
+        let mut s = McpServer::new();
+        // Garbage line → -32700, id null.
+        let r = serde_json::from_str::<Value>(&s.handle_line("not json {{{").unwrap()).unwrap();
+        assert_eq!(r["error"]["code"], -32700);
+        assert_eq!(r["id"], Value::Null);
+        // Unknown method → -32601, id echoed.
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 7, "method": "bogus/method"})).unwrap();
+        assert_eq!(r["error"]["code"], -32601);
+        assert_eq!(r["id"], 7);
+        // Non-object message → -32600.
+        let r = serde_json::from_str::<Value>(&s.handle_line("[1,2,3]").unwrap()).unwrap();
+        assert_eq!(r["error"]["code"], -32600);
+        assert_eq!(r["id"], Value::Null);
+        // Object with id but no method → -32600.
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 8})).unwrap();
+        assert_eq!(r["error"]["code"], -32600);
+        assert_eq!(r["id"], 8);
+    }
+
+    #[test]
+    fn resources_round_trip() {
+        let mut s = McpServer::new();
+        // No document → empty list.
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 1, "method": "resources/list"})).unwrap();
+        assert_eq!(r["result"]["resources"], json!([]));
+        // Templates always list the three URIs.
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 2, "method": "resources/templates/list"})).unwrap();
+        let templates = r["result"]["resourceTemplates"].as_array().unwrap();
+        assert_eq!(templates.len(), 3);
+        // Set a buffer → the three live resources appear.
+        call(&mut s, 3, "source_set", json!({"text": "\\section{A}\nHello world."}));
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 4, "method": "resources/list"})).unwrap();
+        let resources = r["result"]["resources"].as_array().unwrap();
+        assert_eq!(resources.len(), 3);
+        assert_eq!(resources[0]["uri"], SOURCE_URI);
+        assert_eq!(resources[0]["mimeType"], "text/plain");
+        // Read each one.
+        let read = |s: &mut McpServer, id: u64, uri: &str| {
+            rpc(s, &json!({"jsonrpc": "2.0", "id": id, "method": "resources/read", "params": {"uri": uri}})).unwrap()
+        };
+        let r = read(&mut s, 5, SOURCE_URI);
+        let c = &r["result"]["contents"][0];
+        assert_eq!(c["uri"], SOURCE_URI);
+        assert_eq!(c["mimeType"], "text/plain");
+        assert_eq!(c["text"], "\\section{A}\nHello world.");
+        let r = read(&mut s, 6, STRUCTURE_URI);
+        let c = &r["result"]["contents"][0];
+        assert_eq!(c["mimeType"], "application/json");
+        let v: Value = serde_json::from_str(c["text"].as_str().unwrap()).unwrap();
+        assert_eq!(v["headings"][0]["title"], "A");
+        let r = read(&mut s, 7, STATS_URI);
+        let v: Value = serde_json::from_str(r["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(v["words"].as_u64().is_some());
+        // Bad uri → -32602.
+        let r = read(&mut s, 8, "texcraft://doc/nope");
+        assert_eq!(r["error"]["code"], -32602);
+        // Missing uri → -32602.
+        let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": {}})).unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn serve_skips_empty_lines_and_ends_at_eof() {
+        let mut s = McpServer::new();
+        let input = b"\n  \n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n\n".as_slice();
+        let mut out = Vec::new();
+        s.serve(input, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let r: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(r["result"], json!({}));
+    }
+
+    #[test]
+    fn serve_hostile_huge_line_is_capped_not_fatal() {
+        let mut s = McpServer::new();
+        // A ~5 MiB line, then a valid ping — the server must answer both
+        // without buffering the monster whole.
+        let mut input = vec![b'x'; 5 * 1024 * 1024];
+        input.push(b'\n');
+        input.extend_from_slice(b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n");
+        let mut out = Vec::new();
+        s.serve(input.as_slice(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let r: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(r["error"]["code"], -32700);
+        assert_eq!(r["id"], Value::Null);
+        let r: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(r["result"], json!({}));
+        assert_eq!(r["id"], 2);
+    }
+
+    #[test]
+    fn handle_line_never_panics_on_weird_input() {
+        let mut s = McpServer::new();
+        for line in [
+            "",
+            "null",
+            "5",
+            "\"str\"",
+            "{}",
+            "{\"id\":null,\"method\":\"ping\"}",
+            "{\"id\":{\"a\":1},\"method\":\"ping\"}",
+            "{\"method\":5}",
+            "{\"method\":\"tools/call\",\"params\":\"x\",\"id\":3}",
+            "{\"method\":\"tools/call\",\"params\":{\"name\":\"source_get\",\"arguments\":\"nope\"},\"id\":4}",
+            "{\"method\":\"resources/read\",\"params\":{\"uri\":5},\"id\":5}",
+            "  {\"method\":\"ping\",\"id\":6}  ",
+        ] {
+            let _ = s.handle_line(line);
+        }
+        // A null id still counts as a request id in JSON-RPC — it is echoed.
+        let r = serde_json::from_str::<Value>(&s.handle_line("{\"id\":null,\"method\":\"ping\"}").unwrap()).unwrap();
+        assert_eq!(r["result"], json!({}));
+    }
+}
