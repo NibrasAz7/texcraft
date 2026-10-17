@@ -1,0 +1,14 @@
+[package]
+name = "texpkg"
+description = "TexCraft package catalog: curated command/environment completion data authored from CTAN documentation (L3)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "texpkg"
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -3232,12 +3232,18 @@ dependencies = [
  "hayro",
  "image",
  "rfd",
+ "serde_json",
  "texcraft-engine",
  "texparse",
+ "texpkg",
 ]
 
 [[package]]
 name = "texparse"
+version = "0.1.0"
+
+[[package]]
+name = "texpkg"
 version = "0.1.0"
 
 [[package]]

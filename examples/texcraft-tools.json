@@ -1,0 +1,19 @@
+{
+  "tools": [
+    {
+      "name": "BibTeX (.texcraft)",
+      "argv": ["bibtex", ".texcraft/{stem}"],
+      "capture": true
+    },
+    {
+      "name": "MakeIndex (.texcraft)",
+      "argv": ["makeindex", ".texcraft/{stem}.idx"],
+      "capture": true
+    },
+    {
+      "name": "word count (detex)",
+      "argv": ["perl", "-e", "local $/; $_=<>; s/\\\\[a-zA-Z@]+(\\[[^\\]]*\\])?(\\{[^{}]*\\})?/ /g; s/[{}$%&~^_]/ /g; @w=split; print scalar(@w), \" words\\n\";", "{file}"],
+      "capture": true
+    }
+  ]
+}

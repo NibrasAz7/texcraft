@@ -9,7 +9,8 @@
 //! `tectonic` (Track B-lite, zero TeX install) first, then system
 //! xelatex/lualatex/pdflatex on PATH (Track C). Shell escape is never
 //! enabled — Tectonic has no equivalent flag and the system engines
-//! are never passed one.
+//! are never passed one. `user_tool.*` commands run TeXstudio-style
+//! named external tools (fixed argv, no shell — see [`tools`]).
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -17,9 +18,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Value};
-use texparse::{parse_structure, DocStructure};
+use texparse::{parse_magic, parse_structure, DocStructure};
 
 pub mod synctex;
+pub mod tools;
+
+pub use tools::UserTool;
 
 /// Hidden build directory next to the document (`.aux`/`.log`/`.pdf`).
 const BUILD_DIR: &str = ".texcraft";
@@ -40,6 +44,8 @@ pub enum EngineError {
     UnknownCommand(String),
     /// A required parameter is missing or of the wrong type.
     BadParam(&'static str),
+    /// User-tool lookup failure — the session stays usable.
+    Tool(String),
 }
 
 impl std::fmt::Display for EngineError {
@@ -50,6 +56,7 @@ impl std::fmt::Display for EngineError {
             Self::NoFile => write!(f, "document has no file path — save it first"),
             Self::UnknownCommand(c) => write!(f, "unknown command '{c}'"),
             Self::BadParam(p) => write!(f, "missing or invalid parameter '{p}'"),
+            Self::Tool(m) => write!(f, "user tool: {m}"),
         }
     }
 }
@@ -108,6 +115,7 @@ pub struct Session {
     path: Option<PathBuf>,
     src: String,
     dirty: bool,
+    user_tools: Vec<UserTool>,
 }
 
 impl Session {
@@ -118,7 +126,7 @@ impl Session {
 
     /// Session prefilled with `src`, not dirty (e.g. an editor template).
     pub fn with_source(src: String) -> Self {
-        Self { path: None, src, dirty: false }
+        Self { path: None, src, dirty: false, user_tools: Vec::new() }
     }
 
     /// Path of the open file, if any.
@@ -134,6 +142,17 @@ impl Session {
     /// Whether the buffer differs from the file on disk.
     pub fn dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Replace the session's user-tool list (TeXstudio-style named
+    /// external commands; see [`tools`]).
+    pub fn set_user_tools(&mut self, tools: Vec<UserTool>) {
+        self.user_tools = tools;
+    }
+
+    /// The session's configured user tools.
+    pub fn user_tools(&self) -> &[UserTool] {
+        &self.user_tools
     }
 
     /// Replace the buffer contents.
@@ -203,6 +222,32 @@ impl Session {
             }
             "source.get" => Ok(json!({"text": self.src})),
             "structure.get" => Ok(structure_json(&self.structure())),
+            // The `% !TeX`/`% !BIB` header directives of the buffer —
+            // engine/root/encoding/spellcheck hints for the UI.
+            "magic.get" => {
+                let m = parse_magic(&self.src);
+                Ok(json!({
+                    "program": m.program,
+                    "root": m.root,
+                    "encoding": m.encoding,
+                    "bibliography": m.bibliography,
+                    "spellcheck": m.spellcheck,
+                    "jobname": m.jobname,
+                    "engine_hint": m.engine_hint(),
+                    "extras": m.extras.iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
+                }))
+            }
+            "user_tool.list" => Ok(json!({"tools": self.user_tools.iter().map(tools::to_json).collect::<Vec<_>>()})),
+            "user_tool.set" => {
+                let list = params.get("tools").and_then(Value::as_array).ok_or(EngineError::BadParam("tools"))?;
+                self.user_tools = list.iter().map(tools::from_json).collect::<Result<Vec<UserTool>, EngineError>>()?;
+                Ok(json!({"ok": true}))
+            }
+            "user_tool.run" => tools::run(self, params),
+            "user_tool.clear" => {
+                self.user_tools.clear();
+                Ok(json!({"ok": true}))
+            }
             other => Err(EngineError::UnknownCommand(other.to_string())),
         }
     }
@@ -318,9 +363,7 @@ pub fn compile_file(path: &Path, src: Option<&str>) -> Result<CompileReport, Eng
 /// `compile_file` with an explicit engine override — `Some("lualatex")`
 /// pins the binary; `None` auto-picks per the document's packages.
 pub fn compile_file_with(path: &Path, src: Option<&str>, engine_override: Option<&str>) -> Result<CompileReport, EngineError> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path.file_name().ok_or(EngineError::NoFile)?.to_string_lossy();
-    let stem = path.file_stem().ok_or(EngineError::NoFile)?.to_string_lossy();
+    let file_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     let owned;
     let src = match src {
@@ -330,11 +373,36 @@ pub fn compile_file_with(path: &Path, src: Option<&str>, engine_override: Option
             &owned
         }
     };
-    let doc = parse_structure(src);
+
+    // `% !TeX …` header directives the file declares for editors.
+    let magic = parse_magic(src);
+
+    // `% !TeX root = main.tex` — compile the declared master file
+    // instead; the path resolves relative to this document's directory.
+    let root_path = magic.root.as_deref().map(|r| file_dir.join(r)).filter(|c| c != path && c.is_file());
+    let compile_path = root_path.as_deref().unwrap_or(path);
+    let parent = compile_path.parent().unwrap_or_else(|| Path::new("."));
+    let name = compile_path.file_name().ok_or(EngineError::NoFile)?.to_string_lossy();
+    let stem = compile_path.file_stem().ok_or(EngineError::NoFile)?.to_string_lossy();
+
+    // Redirected compiles analyse the root's on-disk text — the buffer
+    // belongs to the \input'ed file, not the master.
+    let root_src;
+    let doc_src = match &root_path {
+        Some(_) => {
+            root_src = String::from_utf8_lossy(&std::fs::read(compile_path)?).into_owned();
+            &root_src
+        }
+        None => src,
+    };
+
+    let doc = parse_structure(doc_src);
     let unicode = doc.packages.iter().any(|(p, _)| UNICODE_PACKAGES.contains(&p.as_str()));
     let engine = match engine_override {
         Some(e) => resolve_engine(e).ok_or(EngineError::NoTexEngine)?,
-        None => find_engine(unicode).ok_or(EngineError::NoTexEngine)?,
+        // `% !TeX program` wins over auto-detection; an unresolvable hint
+        // falls back to the package-driven pick.
+        None => magic.engine_hint().and_then(resolve_engine).or_else(|| find_engine(unicode)).ok_or(EngineError::NoTexEngine)?,
     };
 
     let outdir = parent.join(BUILD_DIR);
@@ -384,10 +452,12 @@ pub fn compile_file_with(path: &Path, src: Option<&str>, engine_override: Option
             let bcf = outdir.join(format!("{stem}.bcf"));
             let aux = outdir.join(format!("{stem}.aux"));
             let needs_bibtex = std::fs::read_to_string(&aux).map(|s| s.contains("\\bibdata")).unwrap_or(false);
+            // `% !BIB program` overrides the tool on the classic bibtex
+            // path; a `.bcf` still pins biber (biblatex's format).
             let bib_tool = if bcf.is_file() {
                 Some("biber")
             } else if needs_bibtex {
-                Some("bibtex")
+                Some(magic.bibliography.as_deref().filter(|b| !b.is_empty()).unwrap_or("bibtex"))
             } else {
                 None
             };
@@ -586,9 +656,37 @@ mod tests {
     }
 
     #[test]
+    fn magic_get_reads_header_directives() {
+        let mut s = Session::new();
+        s.execute(
+            "source.set",
+            &json!({"text": "% !TeX program = xelatex\n% !TeX root = main.tex\n% !BIB program = biber\n\\documentclass{article}\n"}),
+        )
+        .unwrap();
+        let m = s.execute("magic.get", &json!({})).unwrap();
+        assert_eq!(m["program"], "xelatex");
+        assert_eq!(m["root"], "main.tex");
+        assert_eq!(m["bibliography"], "biber");
+        assert_eq!(m["engine_hint"], "xelatex");
+    }
+
+    #[test]
     fn hostile_params_never_panic() {
         let mut s = Session::new();
-        for cmd in ["document.open", "document.save", "document.compile", "source.set", "source.get", "structure.get", "garbage"] {
+        for cmd in [
+            "document.open",
+            "document.save",
+            "document.compile",
+            "source.set",
+            "source.get",
+            "structure.get",
+            "magic.get",
+            "user_tool.list",
+            "user_tool.set",
+            "user_tool.run",
+            "user_tool.clear",
+            "garbage",
+        ] {
             for p in [json!(null), json!({"path": 1, "text": null}), json!("x"), json!([1, 2])] {
                 let _ = s.execute(cmd, &p);
             }

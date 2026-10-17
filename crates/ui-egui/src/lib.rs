@@ -9,11 +9,13 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod edits;
 mod files;
+mod fold;
 mod highlight;
 mod theme;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use egui::text::{CCursor, CCursorRange};
@@ -28,8 +30,8 @@ const PREVIEW_SCALE: f32 = 1.6;
 const MAX_PREVIEW_PX: f32 = 4096.0;
 /// Safety cap: never render more pages than this in one preview.
 const MAX_PREVIEW_PAGES: usize = 128;
-/// Editor gutter width in points.
-const GUTTER_W: f32 = 40.0;
+/// Editor gutter width in points — fold marker + issue dot + number.
+const GUTTER_W: f32 = 56.0;
 /// How often the project tree is rescanned, seconds.
 const TREE_SCAN_SECS: f64 = 1.5;
 
@@ -68,6 +70,32 @@ struct NewEntry {
     is_dir: bool,
 }
 
+/// A gutter issue dot for one source line: every message the last
+/// compile attributed to it, plus whether any is an error (red) versus
+/// all warnings (amber).
+struct GutterMark {
+    is_error: bool,
+    messages: Vec<String>,
+}
+
+/// An open completion popup: the candidate list and where the typed
+/// prefix begins. `start` is a char index into the source; `env` means
+/// we're inside `\begin{…` so candidates come from
+/// `texpkg::environments()`.
+struct Completion {
+    start: usize,
+    /// Char index of the caret when the prefix was last recomputed —
+    /// the `\word`/`{word` span is `start..end`.
+    end: usize,
+    env: bool,
+    items: Vec<&'static texpkg::CommandSpec>,
+    sel: usize,
+}
+
+/// A finished user-tool run (engine `user_tool.run` result).
+#[cfg(not(target_arch = "wasm32"))]
+type ToolJob = Result<serde_json::Value, String>;
+
 /// The studio application state.
 pub struct TexApp {
     session: Session,
@@ -93,12 +121,32 @@ pub struct TexApp {
     outline_open: bool,
     show_logs: bool,
     cursor_lc: (usize, usize),
+    /// 1-based start lines of collapsed fold regions (source coords).
+    /// Cleared on any buffer edit or file switch so a stale fold can't
+    /// hide the wrong lines; survives compiles.
+    folded: BTreeSet<usize>,
+    /// Compile error/warning dots for the gutter, keyed by 1-based
+    /// source line. Rebuilt on every finished compile — stale marks
+    /// survive edits (TeXstudio-style) until the next report.
+    marks: BTreeMap<usize, GutterMark>,
+    /// Widget id of the editor `TextEdit`, set every frame — keyboard
+    /// line commands only fire while it has focus.
+    editor_id: Option<egui::Id>,
     /// Pending "jump to byte offset" for the next editor frame (outline
     /// click-through).
     goto: Option<usize>,
     engines: Vec<String>,
     engine_sel: Option<usize>,
     new_entry: Option<NewEntry>,
+    /// `% !TeX`/`% !BIB` header directives of the buffer — reparsed
+    /// with the structure pass so the status line can show the
+    /// engine/root hint.
+    magic: texparse::Magic,
+    /// Open completion popup, if any.
+    complete: Option<Completion>,
+    /// Result channel of a running user tool.
+    #[cfg(not(target_arch = "wasm32"))]
+    tool_rx: Option<std::sync::mpsc::Receiver<ToolJob>>,
 
     // Auto-compile after idle
     autocompile: bool,
@@ -135,10 +183,17 @@ impl TexApp {
             outline_open: true,
             show_logs: false,
             cursor_lc: (1, 1),
+            folded: BTreeSet::new(),
+            marks: BTreeMap::new(),
+            editor_id: None,
             goto: None,
             engines: Vec::new(),
             engine_sel: None,
             new_entry: None,
+            magic: texparse::Magic::default(),
+            complete: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            tool_rx: None,
             autocompile: false,
             last_edit: f64::NEG_INFINITY,
             compiled_edit: f64::NEG_INFINITY,
@@ -157,6 +212,7 @@ impl TexApp {
 
     fn reparse(&mut self) {
         self.doc = self.session.structure();
+        self.magic = texparse::parse_magic(self.session.source());
     }
 
     fn open_path(&mut self, path: PathBuf) {
@@ -179,7 +235,10 @@ impl TexApp {
                 self.report = None;
                 self.page_idx = 0;
                 self.flash = None;
+                self.folded.clear();
+                self.rebuild_marks(); // report is gone — clear the dots
                 self.reparse();
+                self.load_tools();
             }
             Err(e) => self.status = format!("cannot open {}: {e}", path.display()),
         }
@@ -236,6 +295,190 @@ impl TexApp {
         self.status = "save-as is not available on the web build".into();
     }
 
+    /// Load project user tools from `texcraft-tools.json` next to the
+    /// open document — the same JSON shape `user_tool.set` accepts:
+    /// `{"tools": [{"name": "…", "argv": ["…"], "cwd"?: "…", "capture"?: bool}]}`.
+    /// Missing/invalid files are silent; a parse error surfaces in the
+    /// status line.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_tools(&mut self) {
+        let file = self.project_root().join("texcraft-tools.json");
+        let Ok(text) = std::fs::read_to_string(&file) else { return };
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => match self.session.execute("user_tool.set", &v) {
+                Ok(_) => {
+                    let n = self.session.user_tools().len();
+                    if n > 0 {
+                        self.status = format!("{n} user tool{} from texcraft-tools.json", if n == 1 { "" } else { "s" });
+                    }
+                }
+                Err(e) => self.status = format!("texcraft-tools.json: {e}"),
+            },
+            Err(e) => self.status = format!("texcraft-tools.json: {e}"),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn load_tools(&mut self) {}
+
+    /// Run a configured user tool on a worker — a scratch `Session`
+    /// carries the file path and tool list so `user_tool.run`'s
+    /// placeholder substitution and safety rules apply unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_tool(&mut self, name: String) {
+        let tools: Vec<texcraft_engine::UserTool> = self.session.user_tools().to_vec();
+        let path = self.session.path().map(Path::to_path_buf);
+        self.status = format!("running {name}…");
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tool_rx = Some(rx);
+        std::thread::spawn(move || {
+            let mut s = Session::new();
+            if let Some(p) = &path {
+                let _ = s.open(p);
+            }
+            s.set_user_tools(tools);
+            let out = s.execute("user_tool.run", &serde_json::json!({"name": name})).map_err(|e| e.to_string());
+            let _ = tx.send(out);
+        });
+    }
+
+    /// Collect a finished user-tool run into the status line — the last
+    /// non-empty stdout line when there is one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_tool(&mut self, _ctx: &egui::Context) {
+        let Some(rx) = &self.tool_rx else { return };
+        match rx.try_recv() {
+            Ok(Ok(v)) => {
+                let status = v["status"].as_i64().map(|s| format!("exit {s}")).unwrap_or_else(|| "done".into());
+                let timed_out = v["timed_out"].as_bool().unwrap_or(false);
+                let name = v["name"].as_str().unwrap_or("tool");
+                let tail = v["stdout"].as_str().unwrap_or("").lines().rev().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string());
+                self.status = match (timed_out, tail) {
+                    (true, _) => format!("{name} — timed out"),
+                    (false, Some(l)) => format!("{name} — {status}: {l}"),
+                    (false, None) => format!("{name} — {status}"),
+                };
+                self.tool_rx = None;
+            }
+            Ok(Err(e)) => {
+                self.status = format!("user tool failed: {e}");
+                self.tool_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.tool_rx = None,
+        }
+    }
+
+    /// Completion popup state after each editor frame: a `\word` prefix
+    /// completes commands, `\begin{…`/`\end{…` completes environments.
+    /// Only when the editor is focused and unfolded.
+    fn update_completion(&mut self, out: &egui::text_edit::TextEditOutput, src: &str) {
+        let Some(cr) = out.cursor_range else {
+            self.complete = None;
+            return;
+        };
+        if !out.response.has_focus() {
+            self.complete = None;
+            return;
+        }
+        let ci = cr.primary.index.0;
+        // The ≤64 chars before the caret — enough for `\begin{prefix`.
+        let back_start = src.char_indices().nth(ci.saturating_sub(64)).map(|(b, _)| b).unwrap_or(0);
+        let back = src.get(back_start..byte_of_char(src, ci)).unwrap_or("");
+        // `\begin{` and `\end{` have different lengths — track which hit.
+        let env_prefix =
+            back.rfind("\\begin{").map(|p| p + "\\begin{".len()).or_else(|| back.rfind("\\end{").map(|p| p + "\\end{".len())).and_then(|w_start| {
+                let w = back.get(w_start..)?;
+                (w.chars().all(|c| c.is_ascii_alphabetic() || c == '*') && !w.is_empty()).then(|| w.to_string())
+            });
+        if let Some(w) = env_prefix {
+            let items: Vec<_> = texpkg::environments().filter(|c| c.name.starts_with(w.as_str())).take(8).collect();
+            if items.is_empty() {
+                self.complete = None;
+            } else {
+                let start = ci - w.len() - 1; // the '{'
+                let sel = self.complete.as_ref().map(|c| c.sel.min(items.len() - 1)).unwrap_or(0);
+                self.complete = Some(Completion { start, end: ci, env: true, items, sel });
+            }
+            return;
+        }
+        let cmd_prefix = back.rfind('\\').and_then(|p| {
+            let w = &back[p + 1..];
+            (w.chars().all(|c| c.is_ascii_alphabetic() || c == '@') && w.len() >= 2).then(|| (p, w.to_string()))
+        });
+        if let Some((_, w)) = cmd_prefix {
+            let items: Vec<_> = texpkg::find_prefix(&w).take(8).collect();
+            if items.is_empty() {
+                self.complete = None;
+            } else {
+                let start = ci - w.len() - 1; // the '\'
+                let sel = self.complete.as_ref().map(|c| c.sel.min(items.len() - 1)).unwrap_or(0);
+                self.complete = Some(Completion { start, end: ci, env: false, items, sel });
+            }
+            return;
+        }
+        self.complete = None;
+    }
+
+    /// Accept the highlighted completion: replace the prefix span with
+    /// `\name`/`{name}` (+ `{}` for required-arg commands, caret inside).
+    /// `now` is egui's frame time so the insert counts as a normal edit
+    /// for the idle auto-compile timer.
+    fn accept_completion(&mut self, now: f64) {
+        let Some(c) = self.complete.take() else { return };
+        let Some(item) = c.items.get(c.sel) else { return };
+        let mut src = self.session.source().to_string();
+        let start_b = byte_of_char(&src, c.start);
+        let end_b = byte_of_char(&src, c.end);
+        let insertion = if c.env {
+            format!("{{{}}}", item.name)
+        } else {
+            let braces = if item.args.iter().any(|a| matches!(a.kind, texpkg::ArgKind::Req)) { "{}" } else { "" };
+            format!("\\{}{}", item.name, braces)
+        };
+        src.replace_range(start_b..end_b, &insertion);
+        // Caret: inside the braces for arg-commands, otherwise at end.
+        let caret = if !c.env && insertion.ends_with("{}") { start_b + insertion.len() - 1 } else { start_b + insertion.len() };
+        self.session.set_source(src);
+        self.reparse();
+        self.folded.clear();
+        self.goto = Some(caret);
+        self.last_edit = now;
+    }
+
+    /// Float the completion popup under the caret.
+    fn draw_completion(&mut self, ctx: &egui::Context, out: &egui::text_edit::TextEditOutput) {
+        let Some(c) = &self.complete else { return };
+        let Some(cr) = out.cursor_range else { return };
+        let caret = out.galley.pos_from_cursor(cr.primary);
+        let pos = egui::pos2(out.galley_pos.x + caret.min.x, out.galley_pos.y + caret.max.y + 4.0);
+        let mut accept = false;
+        egui::Area::new(egui::Id::new("completion")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(420.0);
+                for (i, item) in c.items.iter().enumerate() {
+                    let sig = item
+                        .args
+                        .iter()
+                        .map(|a| match a.kind {
+                            texpkg::ArgKind::Opt | texpkg::ArgKind::Key => format!("[{}]", a.name),
+                            _ => format!("{{{}}}", a.name),
+                        })
+                        .collect::<String>();
+                    let label = if c.env { format!("{}   {}", item.name, sig) } else { format!("\\{}   {}", item.name, sig) };
+                    let resp = ui.selectable_label(i == c.sel, egui::RichText::new(label).monospace().size(11.5));
+                    ui.label(egui::RichText::new(format!("{} — {}", item.package, item.doc)).size(9.5).color(theme::pal().muted));
+                    if resp.clicked() {
+                        accept = true;
+                    }
+                }
+            });
+        });
+        if accept {
+            self.accept_completion(ctx.input(|i| i.time));
+        }
+    }
+
     /// Kick off `document.compile` + PDF rasterization on a worker thread.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_compile(&mut self) {
@@ -287,6 +530,7 @@ impl TexApp {
                 self.page_idx = self.page_idx.min(self.pages.len().saturating_sub(1));
                 self.flash = None;
                 self.report = Some(report);
+                self.rebuild_marks();
                 self.compiling = false;
                 self.compile_rx = None;
                 // Surface failures without making the user open Logs.
@@ -406,6 +650,131 @@ impl TexApp {
         }
     }
 
+    /// Rebuild gutter marks from the compile report. Only issues with a
+    /// reported line get a dot — positions are never invented. Marks are
+    /// kept until the next compile or a file switch (edits leave them
+    /// stale, like TeXstudio).
+    fn rebuild_marks(&mut self) {
+        self.marks.clear();
+        let Some(r) = &self.report else { return };
+        for e in &r.errors {
+            let Some(l) = e.line else { continue };
+            let m = self.marks.entry(l as usize).or_insert_with(|| GutterMark { is_error: true, messages: Vec::new() });
+            m.is_error = true;
+            m.messages.push(e.message.clone());
+        }
+        for w in &r.warnings {
+            let Some(l) = w.line else { continue };
+            self.marks
+                .entry(l as usize)
+                .or_insert_with(|| GutterMark { is_error: false, messages: Vec::new() })
+                .messages
+                .push(format!("warning: {}", w.message));
+        }
+    }
+
+    /// `view.fold_all` — collapse every foldable region.
+    fn fold_all(&mut self) {
+        let line_count = self.session.source().bytes().filter(|b| *b == b'\n').count() + 1;
+        for r in fold::regions(&self.doc, line_count) {
+            self.folded.insert(r.start);
+        }
+    }
+
+    /// `view.unfold_all` — expand everything, restoring the live buffer.
+    fn unfold_all(&mut self) {
+        self.folded.clear();
+    }
+
+    /// `view.fold_toggle` — collapse/expand the region starting at
+    /// `start` (1-based source line).
+    fn toggle_fold(&mut self, start: usize) {
+        if !self.folded.remove(&start) {
+            self.folded.insert(start);
+        }
+    }
+
+    /// Editor line commands: Ctrl+D duplicate, Alt+↑/↓ move, Ctrl+/
+    /// comment-toggle, Ctrl+Shift+K erase line, Ctrl+Shift+Backspace
+    /// erase to end of line. Keys are consumed before the `TextEdit`
+    /// sees them; all commands are disabled while a fold is active
+    /// (the editor is read-only then anyway).
+    fn editor_shortcuts(&mut self, ctx: &egui::Context) {
+        if !self.folded.is_empty() {
+            return;
+        }
+        let Some(editor_id) = self.editor_id else { return };
+        if !ctx.memory(|m| m.has_focus(editor_id)) {
+            return;
+        }
+        use egui::{Key, Modifiers};
+        // Most-specific modifiers first (matches_logically ignores
+        // extras); distinct keys make the rest order-free.
+        enum Op {
+            Erase,
+            EraseEol,
+            Duplicate,
+            Move(edits::Move),
+            Comment,
+        }
+        let op = if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::K)) {
+            Some(Op::Erase)
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Backspace)) {
+            Some(Op::EraseEol)
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::D)) {
+            Some(Op::Duplicate)
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowUp)) {
+            Some(Op::Move(edits::Move::Up))
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::ALT, Key::ArrowDown)) {
+            Some(Op::Move(edits::Move::Down))
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Slash)) {
+            // egui maps the numpad `/` to Key::Slash too — one binding
+            // covers both.
+            Some(Op::Comment)
+        } else {
+            None
+        };
+        let Some(op) = op else { return };
+
+        let mut src = self.session.source().to_string();
+        let (line, col) = self.cursor_lc; // 1-based
+                                          // (new caret line 0-based, new caret col 1-based)
+        let caret = match op {
+            Op::Erase => edits::erase_line(&mut src, line.saturating_sub(1)).map(|l| (l, col)),
+            Op::EraseEol => {
+                edits::erase_to_eol(&mut src, line.saturating_sub(1), col.saturating_sub(1));
+                Some((line.saturating_sub(1), col))
+            }
+            Op::Duplicate => edits::duplicate_line(&mut src, line.saturating_sub(1)).map(|l| (l, col)),
+            Op::Move(d) => edits::move_line(&mut src, line.saturating_sub(1), d).map(|l| (l, col)),
+            Op::Comment => {
+                let (first, last) = self.selection_lines(ctx, editor_id, &src);
+                edits::comment_lines(&mut src, first, last);
+                Some((line.saturating_sub(1), col))
+            }
+        };
+        if src.as_str() == self.session.source() {
+            return; // boundary no-op (e.g. move past the edge)
+        }
+        self.session.set_source(src);
+        self.last_edit = ctx.input(|i| i.time);
+        self.reparse();
+        self.folded.clear(); // any edit invalidates folds
+        if let Some((l, c)) = caret {
+            self.goto = Some(offset_of_line_col(self.session.source(), l + 1, c));
+        }
+    }
+
+    /// 0-based line span of the current selection, or the caret line.
+    fn selection_lines(&self, ctx: &egui::Context, editor_id: egui::Id, src: &str) -> (usize, usize) {
+        let caret_line = self.cursor_lc.0.saturating_sub(1);
+        let Some(st) = egui::text_edit::TextEditState::load(ctx, editor_id) else { return (caret_line, caret_line) };
+        let Some(range) = st.cursor.char_range() else { return (caret_line, caret_line) };
+        let a = line_of_char_index(src, range.primary.index.0);
+        let b = line_of_char_index(src, range.secondary.index.0);
+        (a.min(b), a.max(b))
+    }
+
     // ---------- chrome ----------
 
     /// Top bar: project identity, save state, compile + toggles.
@@ -449,6 +818,25 @@ impl TexApp {
                         }
                         ui.separator();
                         ui.checkbox(&mut self.autocompile, "auto-compile after 5 s idle");
+                        // User tools from texcraft-tools.json — fixed-argv
+                        // external commands run on a worker (M2 surface).
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            let tools: Vec<String> = self.session.user_tools().iter().map(|t| t.name.clone()).collect();
+                            if !tools.is_empty() {
+                                ui.separator();
+                                ui.label(egui::RichText::new("user tools").size(10.0).color(theme::pal().muted));
+                                let mut run: Option<String> = None;
+                                for name in tools {
+                                    if ui.selectable_label(false, &name).clicked() {
+                                        run = Some(name);
+                                    }
+                                }
+                                if let Some(name) = run {
+                                    self.start_tool(name);
+                                }
+                            }
+                        }
                     });
                     if self.compiling {
                         ui.spinner();
@@ -531,7 +919,18 @@ impl TexApp {
 
                 if self.outline_open {
                     ui.separator();
-                    ui.label(egui::RichText::new("FILE OUTLINE").size(10.0).color(theme::pal().faint).strong());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("FILE OUTLINE").size(10.0).color(theme::pal().faint).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // view.unfold_all / view.fold_all
+                            if ui.small_button("unfold").on_hover_text("view.unfold_all").clicked() {
+                                self.unfold_all();
+                            }
+                            if ui.small_button("fold all").on_hover_text("view.fold_all").clicked() {
+                                self.fold_all();
+                            }
+                        });
+                    });
                     egui::ScrollArea::vertical().id_salt("outline").auto_shrink([false, true]).show(ui, |ui| {
                         if self.doc.headings.is_empty() {
                             ui.weak("(no headings)");
@@ -592,16 +991,66 @@ impl TexApp {
             // Editor body
             let mut src = self.session.source().to_string();
             let editor_id = ui.id().with("tex-editor");
+            self.editor_id = Some(editor_id);
+            let line_count = src.bytes().filter(|b| *b == b'\n').count() + 1;
+            let regions = fold::regions(&self.doc, line_count);
+            // Defensive: drop fold starts that aren't current regions
+            // (the edit path already clears `folded`, so this only
+            // prunes leftovers like a reparse after file switch).
+            self.folded.retain(|l| regions.iter().any(|r| r.start == *l));
+            // Folded mode: the TextEdit shows a derived read-only
+            // buffer; `src` stays the true source.
+            let view = fold::build_view(&src, &self.folded, &regions);
+            let mut folded_text = view.as_ref().map(|v| v.text.clone());
             if let Some(off) = self.goto.take() {
                 let mut st = egui::text_edit::TextEditState::load(ui.ctx(), editor_id).unwrap_or_default();
-                let idx = src.get(..off).map(|s| s.chars().count()).unwrap_or_else(|| src.chars().count());
+                // `goto` is a source byte offset; in folded mode it must
+                // land on the visible row showing that line instead.
+                let shown = folded_text.as_deref().unwrap_or(src.as_str());
+                let shown_off = match &view {
+                    Some(v) => {
+                        let line = line_of_byte_offset(&src, off);
+                        let row = fold::visible_row(v, &regions, line);
+                        offset_of_line_col(&v.text, row + 1, 1)
+                    }
+                    None => off,
+                };
+                let idx = shown.get(..shown_off).map(|s| s.chars().count()).unwrap_or_else(|| shown.chars().count());
                 st.cursor.set_char_range(Some(CCursorRange::one(CCursor { index: egui::text::CharIndex(idx), prefer_next_row: false })));
                 st.store(ui.ctx(), editor_id);
                 ui.ctx().memory_mut(|m| m.request_focus(editor_id));
             }
+            // Completion popup navigation — consumed before the TextEdit
+            // can see the keys (arrows pick, Enter/Tab accept, Esc closes).
+            if self.complete.is_some() && view.is_none() {
+                let mut accept = false;
+                ui.ctx().input_mut(|i| {
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        if let Some(c) = &mut self.complete {
+                            c.sel = (c.sel + 1).min(c.items.len().saturating_sub(1));
+                        }
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        if let Some(c) = &mut self.complete {
+                            c.sel = c.sel.saturating_sub(1);
+                        }
+                    }
+                    accept = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) || accept;
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                        self.complete = None;
+                    }
+                });
+                if accept {
+                    self.accept_completion(ui.ctx().input(|i| i.time));
+                }
+            }
             let mut layouter = |ui: &egui::Ui, s: &dyn egui::TextBuffer, w: f32| highlight::layout(ui, s, w);
             let avail = ui.available_size();
-            let out = egui::TextEdit::multiline(&mut src)
+            let buf: &mut String = match folded_text.as_mut() {
+                Some(t) => t,
+                None => &mut src,
+            };
+            let mut te = egui::TextEdit::multiline(buf)
                 .id(editor_id)
                 .layouter(&mut layouter)
                 .font(egui::TextStyle::Monospace)
@@ -613,15 +1062,24 @@ impl TexApp {
                     right: 8,
                     top: 4,
                     bottom: 4,
-                }))
-                .show(ui);
-            if out.response.changed() {
+                }));
+            if view.is_some() {
+                te = te.interactive(false); // read-only while folded
+            }
+            let out = te.show(ui);
+            if out.response.changed() && view.is_none() {
                 self.session.set_source(src.clone());
                 self.last_edit = ui.ctx().input(|i| i.time);
                 self.reparse();
+                self.folded.clear(); // any edit invalidates folds
             }
-            self.paint_gutter(ui, &out, &src);
-            self.track_cursor(ui.ctx(), editor_id, &src);
+            self.paint_gutter(ui, &out, view.as_ref(), &regions);
+            let shown = folded_text.as_deref().unwrap_or(src.as_str());
+            self.track_cursor(ui.ctx(), editor_id, shown, view.as_ref());
+            if view.is_none() {
+                self.update_completion(&out, &src);
+            }
+            self.draw_completion(ui.ctx(), &out);
             #[cfg(not(target_arch = "wasm32"))]
             if out.response.clicked() && ui.ctx().input(|i| i.modifiers.command) {
                 let now = ui.ctx().input(|i| i.time);
@@ -630,15 +1088,18 @@ impl TexApp {
         });
     }
 
-    /// Line-number gutter + active-line band, painted into the editor's
-    /// left margin. Rows come from the live galley so they track scroll.
-    fn paint_gutter(&self, ui: &egui::Ui, out: &egui::text_edit::TextEditOutput, _src: &str) {
+    /// Line-number gutter + fold markers + issue dots + active-line
+    /// band, painted into the editor's left margin. Rows come from the
+    /// live galley so they track scroll; in folded mode `view.src_lines`
+    /// maps each visible row back to its source line.
+    fn paint_gutter(&mut self, ui: &mut egui::Ui, out: &egui::text_edit::TextEditOutput, view: Option<&fold::View>, regions: &[fold::Region]) {
         let rect = out.response.rect;
         let band = egui::Rect::from_min_max(rect.min, egui::pos2(rect.left() + GUTTER_W, rect.bottom()));
         let painter = ui.painter().with_clip_rect(rect);
         painter.rect_filled(band, 0.0, theme::pal().editor_bg);
         painter.vline(band.right(), band.y_range(), egui::Stroke::new(1.0, theme::pal().border));
 
+        let src_line_of = |i: usize| view.and_then(|v| v.src_lines.get(i).copied()).unwrap_or(i + 1);
         let mono = egui::TextStyle::Monospace.resolve(ui.style());
         let (cur_line, _) = self.cursor_lc;
         for (i, placed) in out.galley.rows.iter().enumerate() {
@@ -646,12 +1107,45 @@ impl TexApp {
             if y < rect.top() - 4.0 || y > rect.bottom() {
                 continue;
             }
-            let cur = i + 1 == cur_line;
+            let src_line = src_line_of(i);
+            let row_h = placed.row.size.y;
+
+            // Compile issue dot (red error / amber warning), leftmost.
+            if let Some(m) = self.marks.get(&src_line) {
+                let c = egui::pos2(band.left() + 8.0, y + row_h * 0.5);
+                painter.circle_filled(c, 3.0, if m.is_error { theme::pal().error } else { theme::pal().warn });
+                let hit = egui::Rect::from_center_size(c, egui::vec2(12.0, row_h));
+                ui.interact(hit, ui.id().with(("mark", src_line)), egui::Sense::hover()).on_hover_text(m.messages.join("\n"));
+            }
+
+            // Fold triangle on each region start: ▸ collapsed / ▾ open.
+            if let Some(r) = regions.iter().find(|r| r.start == src_line) {
+                let collapsed = self.folded.contains(&src_line);
+                let hit = egui::Rect::from_min_max(egui::pos2(band.left() + 14.0, y), egui::pos2(band.left() + 30.0, y + row_h));
+                let resp = ui.interact(hit, ui.id().with(("fold", src_line)), egui::Sense::click());
+                let ink = if resp.hovered() { theme::pal().text } else { theme::pal().faint };
+                let (cx, cy) = (hit.left() + 6.0, hit.center().y);
+                let pts = if collapsed {
+                    vec![egui::pos2(cx, cy - 3.5), egui::pos2(cx, cy + 3.5), egui::pos2(cx + 6.0, cy)]
+                } else {
+                    vec![egui::pos2(cx, cy - 2.5), egui::pos2(cx + 7.0, cy - 2.5), egui::pos2(cx + 3.5, cy + 3.0)]
+                };
+                painter.add(egui::Shape::convex_polygon(pts, ink, egui::Stroke::NONE));
+                let n = r.end - r.start;
+                let lines = if n == 1 { "line" } else { "lines" };
+                let resp = resp.on_hover_text(if collapsed { format!("unfold — {n} hidden {lines}") } else { format!("fold {n} {lines}") });
+                if resp.clicked() {
+                    self.toggle_fold(src_line);
+                }
+            }
+
+            let cur = src_line == cur_line;
             let color = if cur { theme::pal().text } else { theme::pal().faint };
-            painter.text(egui::pos2(band.right() - 8.0, y), egui::Align2::RIGHT_TOP, format!("{}", i + 1), mono.clone(), color);
+            painter.text(egui::pos2(band.right() - 8.0, y), egui::Align2::RIGHT_TOP, format!("{src_line}"), mono.clone(), color);
         }
         // Active line wash (after the gutter so it never hides numbers).
-        if let Some(placed) = out.galley.rows.get(cur_line.saturating_sub(1)) {
+        let cur_row = (0..out.galley.rows.len()).find(|&i| src_line_of(i) == cur_line);
+        if let Some(placed) = cur_row.and_then(|i| out.galley.rows.get(i)) {
             let r = egui::Rect::from_min_max(
                 egui::pos2(band.right(), out.galley_pos.y + placed.pos.y),
                 egui::pos2(rect.right(), out.galley_pos.y + placed.pos.y + placed.row.size.y),
@@ -663,7 +1157,9 @@ impl TexApp {
     }
 
     /// Read the editor's caret into `cursor_lc` for the status bar.
-    fn track_cursor(&mut self, ctx: &egui::Context, editor_id: egui::Id, src: &str) {
+    /// In folded mode the caret's visible row is mapped back to its
+    /// source line so Ln/Col and SyncTeX stay in source coordinates.
+    fn track_cursor(&mut self, ctx: &egui::Context, editor_id: egui::Id, src: &str, view: Option<&fold::View>) {
         let Some(st) = egui::text_edit::TextEditState::load(ctx, editor_id) else { return };
         let Some(range) = st.cursor.char_range() else { return };
         let char_idx = range.primary.index.0;
@@ -681,6 +1177,9 @@ impl TexApp {
                 col += 1;
             }
         }
+        if let Some(v) = view {
+            line = v.src_lines.get(line.saturating_sub(1)).copied().unwrap_or(line);
+        }
         self.cursor_lc = (line, col);
     }
 
@@ -695,6 +1194,20 @@ impl TexApp {
                     let n = self.doc.issues.len();
                     let msg = if n == 0 { "no issues".to_string() } else { format!("⚠ {n} issue{}", if n == 1 { "" } else { "s" }) };
                     ui.label(egui::RichText::new(msg).size(10.5).color(if n == 0 { theme::pal().muted } else { theme::pal().warn }));
+                    if !self.folded.is_empty() {
+                        ui.separator();
+                        ui.label(egui::RichText::new("folded — unfold to edit").size(10.5).color(theme::pal().warn));
+                    }
+                    if let Some(h) = self.magic.engine_hint() {
+                        ui.separator();
+                        ui.label(egui::RichText::new(format!("⌁ {h}")).size(10.5).color(theme::pal().syn_cmd))
+                            .on_hover_text("% !TeX program — the file picks its own engine");
+                    }
+                    if let Some(r) = &self.magic.root {
+                        ui.separator();
+                        ui.label(egui::RichText::new(format!("root→{r}")).size(10.5).color(theme::pal().muted))
+                            .on_hover_text("% !TeX root — compiles the master file");
+                    }
                     ui.separator();
                     ui.weak(&self.status);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -948,6 +1461,29 @@ fn handle_screenshot(ctx: &egui::Context) {
     }
 }
 
+/// 0-based line of `char_idx` (a `CCursor` char index) in `src`.
+fn line_of_char_index(src: &str, char_idx: usize) -> usize {
+    src.chars().take(char_idx).filter(|c| *c == '\n').count()
+}
+
+/// 1-based line of byte `off` in `src` (clamps a non-boundary offset).
+fn line_of_byte_offset(src: &str, off: usize) -> usize {
+    let mut end = off.min(src.len());
+    while end > 0 && !src.is_char_boundary(end) {
+        end -= 1;
+    }
+    src.get(..end).map(|s| s.bytes().filter(|b| *b == b'\n').count()).unwrap_or(0) + 1
+}
+
+/// No screenshots on the web build.
+#[cfg(target_arch = "wasm32")]
+fn handle_screenshot(_ctx: &egui::Context) {}
+
+/// Byte offset of the `ci`-th char in `src` (clamped to `src.len()`).
+fn byte_of_char(src: &str, ci: usize) -> usize {
+    src.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(src.len())
+}
+
 /// Byte offset of (1-based `line`, 1-based byte `col`) in `src`.
 /// Input-derived values: clamps instead of panicking.
 fn offset_of_line_col(src: &str, line: usize, col: usize) -> usize {
@@ -1132,6 +1668,7 @@ impl eframe::App for TexApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.poll_compile(ctx);
+            self.poll_tool(ctx);
             self.tick_autocompile(ctx);
         }
         self.refresh_tree(ctx);
@@ -1143,6 +1680,7 @@ impl eframe::App for TexApp {
         if ctx.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.ctrl) {
             self.save();
         }
+        self.editor_shortcuts(&ctx);
         handle_screenshot(&ctx);
 
         self.top_bar(ui);

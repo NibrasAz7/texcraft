@@ -13,16 +13,22 @@
 //! - [`bib`] — a `.bib` (BibTeX) file parser: entries, fields, `@string`
 //!   expansion, `@preamble`/`@comment`, with issues collected instead of
 //!   hard failures.
+//! - [`magic`] — editor "magic comment" header directives
+//!   (`% !TeX program = xelatex`, `% !BIB program = biber`): build-engine,
+//!   root, encoding, spellcheck and jobname hints read from the leading
+//!   comment block the way TeXstudio/TeXShop honor them.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 mod bib;
 mod lex;
+mod magic;
 mod structure;
 
 pub use bib::{parse_bib, BibEntry, BibFile};
 pub use lex::{lex, Pos, Tok, Token};
+pub use magic::{parse as parse_magic, Magic};
 pub use structure::{parse_structure, DocStructure, Env, Heading, Issue};
 
 /// Hard caps so hostile input can't exhaust memory or stack.

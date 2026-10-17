@@ -61,3 +61,26 @@ widget) are tracked there — nothing in M0 depends on them.
   `docs/TEXSTUDIO-SURVEY.md` merge plan: magic comments, user tools,
   `.cwl`-style curated completion, folding, templates, log marks,
   inline math preview scheduled across M2–M4+.
+- M3.3 — Painted sun/moon theme icon (pure Painter geometry, no font
+  glyphs) replacing the text toggle.
+- M1.2 — craft-libs adoption: `craft-atomic` crash-safe saves (tmp→
+  fsync→rename) in Session::save + new-file dialog; `craft-quit`
+  platform-correct quit hook; compile/tree polling moved into eframe
+  `logic` so minimized windows keep working. Pinned rev `457a078`.
+- M2/M3 Wave-1 — TeXstudio surface, clean-room (all four streams
+  parallel-built, disjoint crates):
+  * texparse `magic.rs` — `% !TeX program/root/encoding/bibliography/
+    spellcheck/jobname` + `% !BIB program` header directives,
+    `engine_hint()` normalization; engine consumes program→engine
+    pick, root→master-file compile, BIB→bib-tool override; `magic.get`.
+  * `texpkg` (new L3 crate) — curated 271-entry command/environment/
+    package catalog (own data, not copied `.cwl`).
+  * engine `tools.rs` — `user_tool.set/list/run/clear`: fixed-argv
+    spawn (no shell), `{file}/{dir}/{stem}/{basename}` placeholders,
+    60 s timeout + kill, 256 KiB drained output cap. UI loads
+    `texcraft-tools.json` per project; demo file in examples/.
+  * ui-egui — full block folding (heading/env regions, derived folded
+    buffer, source-coordinate remapping); line ops Ctrl+D/Alt+↑↓/
+    Ctrl+//Ctrl+Shift+K/Ctrl+Shift+Bksp; compile errors→gutter dots+
+    tooltips; completion popup (\cmd ≥2 chars, \begin/\end envs, ↑↓
+    Enter/Tab Esc); magic directives in status bar.
