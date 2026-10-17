@@ -30,7 +30,7 @@ const MAX_DEPTH: usize = 6;
 const MAX_NODES: usize = 400;
 
 /// Directories never shown (build output, VCS, caches).
-const SKIP_DIRS: &[&str] = &[".texcraft", ".git", "target", "node_modules"];
+const SKIP_DIRS: &[&str] = &[".warraqcraft", ".git", "target", "node_modules"];
 
 fn kind_of(path: &Path, is_dir: bool) -> Kind {
     if is_dir {

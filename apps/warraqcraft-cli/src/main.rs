@@ -1,21 +1,21 @@
-//! texcraft-cli — headless TexCraft.
+//! warraqcraft-cli — headless WarraqCraft.
 //!
-//!   texcraft-cli parse <file.tex>     document structure outline
-//!   texcraft-cli check <file.tex>     structural issues only; exit 1 if any
-//!   texcraft-cli bib <file.bib>       bibliography entries and issues
-//!   texcraft-cli compile <file.tex>   system-TeX compile to .texcraft/; exit 1 on errors
-//!   texcraft-cli cmd <command> [--file f.tex] [--params '<json>'] [--check]
-//!   texcraft-cli commands             list engine command names
-//!   texcraft-cli mcp                  MCP server over stdin/stdout (opt-in)
-//!   texcraft-cli ui --control FILE <command> [--params '<json>']
-//!                                     drive a running `texcraft --control FILE`
+//!   warraqcraft-cli parse <file.tex>     document structure outline
+//!   warraqcraft-cli check <file.tex>     structural issues only; exit 1 if any
+//!   warraqcraft-cli bib <file.bib>       bibliography entries and issues
+//!   warraqcraft-cli compile <file.tex>   system-TeX compile to .warraqcraft/; exit 1 on errors
+//!   warraqcraft-cli cmd <command> [--file f.tex] [--params '<json>'] [--check]
+//!   warraqcraft-cli commands             list engine command names
+//!   warraqcraft-cli mcp                  MCP server over stdin/stdout (opt-in)
+//!   warraqcraft-cli ui --control FILE <command> [--params '<json>']
+//!                                     drive a running `warraqcraft --control FILE`
 
 use std::path::Path;
 use std::process::ExitCode;
 
 use serde_json::Value;
-use texcraft_engine::Session;
 use texparse::{parse_bib, parse_structure};
+use warraqcraft_engine::Session;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -43,20 +43,20 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!(
-        "texcraft-cli — headless TexCraft\n\
+        "warraqcraft-cli — headless WarraqCraft\n\
          \n\
          usage:\n\
-         \x20 texcraft-cli parse <file.tex>   document structure outline\n\
-         \x20 texcraft-cli check <file.tex>   structural issues (exit 1 if any)\n\
-         \x20 texcraft-cli bib   <file.bib>   bibliography entries\n\
-         \x20 texcraft-cli compile <file.tex> system-TeX compile (exit 1 on errors)\n\
-         \x20 texcraft-cli cmd <command> [--file f.tex] [--params '<json>'] [--check]\n\
+         \x20 warraqcraft-cli parse <file.tex>   document structure outline\n\
+         \x20 warraqcraft-cli check <file.tex>   structural issues (exit 1 if any)\n\
+         \x20 warraqcraft-cli bib   <file.bib>   bibliography entries\n\
+         \x20 warraqcraft-cli compile <file.tex> system-TeX compile (exit 1 on errors)\n\
+         \x20 warraqcraft-cli cmd <command> [--file f.tex] [--params '<json>'] [--check]\n\
          \x20                            run an engine command, print JSON result\n\
-         \x20                            e.g. texcraft-cli cmd source.get --file main.tex\n\
-         \x20 texcraft-cli commands        list engine command names\n\
-         \x20 texcraft-cli mcp             MCP server over stdin/stdout (opt-in)\n\
-         \x20 texcraft-cli ui --control F <command> [--params '<json>']\n\
-         \x20                            drive a running `texcraft --control F`\n"
+         \x20                            e.g. warraqcraft-cli cmd source.get --file main.tex\n\
+         \x20 warraqcraft-cli commands        list engine command names\n\
+         \x20 warraqcraft-cli mcp             MCP server over stdin/stdout (opt-in)\n\
+         \x20 warraqcraft-cli ui --control F <command> [--params '<json>']\n\
+         \x20                            drive a running `warraqcraft --control F`\n"
     );
 }
 
@@ -68,7 +68,7 @@ fn with_file(arg: Option<&String>, f: fn(&str, &str) -> ExitCode) -> ExitCode {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("texcraft-cli: cannot read {path}: {e}");
+            eprintln!("warraqcraft-cli: cannot read {path}: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -139,7 +139,7 @@ fn compile_cmd(arg: Option<&String>) -> ExitCode {
         usage();
         return ExitCode::FAILURE;
     };
-    match texcraft_engine::compile_file(Path::new(path), None) {
+    match warraqcraft_engine::compile_file(Path::new(path), None) {
         Ok(report) => {
             for e in &report.errors {
                 match e.line {
@@ -164,7 +164,7 @@ fn compile_cmd(arg: Option<&String>) -> ExitCode {
             }
         }
         Err(e) => {
-            eprintln!("texcraft-cli: {e}");
+            eprintln!("warraqcraft-cli: {e}");
             ExitCode::FAILURE
         }
     }
@@ -238,7 +238,7 @@ fn cmd_cmd(args: &[String]) -> ExitCode {
                 match args.get(i) {
                     Some(v) => file = Some(v.as_str()),
                     None => {
-                        eprintln!("texcraft-cli: --file needs a path");
+                        eprintln!("warraqcraft-cli: --file needs a path");
                         return ExitCode::FAILURE;
                     }
                 }
@@ -249,24 +249,24 @@ fn cmd_cmd(args: &[String]) -> ExitCode {
                     Some(v) => match parse_params(v) {
                         Ok(p) => params = p,
                         Err(e) => {
-                            eprintln!("texcraft-cli: {e}");
+                            eprintln!("warraqcraft-cli: {e}");
                             return ExitCode::FAILURE;
                         }
                     },
                     None => {
-                        eprintln!("texcraft-cli: --params needs a JSON object");
+                        eprintln!("warraqcraft-cli: --params needs a JSON object");
                         return ExitCode::FAILURE;
                     }
                 }
             }
             "--check" => check = true,
             _ if a.starts_with('-') => {
-                eprintln!("texcraft-cli: unknown option {a}");
+                eprintln!("warraqcraft-cli: unknown option {a}");
                 return ExitCode::FAILURE;
             }
             _ => {
                 if name.is_some() {
-                    eprintln!("texcraft-cli: unexpected argument {a}");
+                    eprintln!("warraqcraft-cli: unexpected argument {a}");
                     return ExitCode::FAILURE;
                 }
                 name = Some(a);
@@ -284,7 +284,7 @@ fn cmd_cmd(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("texcraft-cli: {e}");
+            eprintln!("warraqcraft-cli: {e}");
             ExitCode::FAILURE
         }
     }
@@ -320,23 +320,23 @@ fn check_failed(v: &Value) -> bool {
     v.get("errors").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) || v.get("ok").and_then(Value::as_bool) == Some(false)
 }
 
-/// `texcraft-cli mcp` — opt-in stdio MCP server (NDJSON JSON-RPC over
+/// `warraqcraft-cli mcp` — opt-in stdio MCP server (NDJSON JSON-RPC over
 /// stdin/stdout; no port is opened). Runs until stdin closes.
 fn mcp_cmd() -> ExitCode {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    let mut server = texcraft_mcp::McpServer::new();
+    let mut server = warraqcraft_mcp::McpServer::new();
     match server.serve(stdin.lock(), stdout.lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("texcraft-cli mcp: {e}");
+            eprintln!("warraqcraft-cli mcp: {e}");
             ExitCode::FAILURE
         }
     }
 }
 
-/// `texcraft-cli ui --control FILE <cmd> [--params '<json>']` — one
-/// request against a running app's control channel (`texcraft
+/// `warraqcraft-cli ui --control FILE <cmd> [--params '<json>']` — one
+/// request against a running app's control channel (`warraqcraft
 /// --control FILE`). The control file carries {"port","token","pid"};
 /// the channel speaks one newline-delimited JSON request per line.
 fn ui_cmd(args: &[String]) -> ExitCode {
@@ -351,7 +351,7 @@ fn ui_cmd(args: &[String]) -> ExitCode {
                 match args.get(i) {
                     Some(v) => control = Some(v.as_str()),
                     None => {
-                        eprintln!("texcraft-cli: --control needs a file path");
+                        eprintln!("warraqcraft-cli: --control needs a file path");
                         return ExitCode::FAILURE;
                     }
                 }
@@ -362,23 +362,23 @@ fn ui_cmd(args: &[String]) -> ExitCode {
                     Some(v) => match parse_params(v) {
                         Ok(p) => params = p,
                         Err(e) => {
-                            eprintln!("texcraft-cli: {e}");
+                            eprintln!("warraqcraft-cli: {e}");
                             return ExitCode::FAILURE;
                         }
                     },
                     None => {
-                        eprintln!("texcraft-cli: --params needs a JSON object");
+                        eprintln!("warraqcraft-cli: --params needs a JSON object");
                         return ExitCode::FAILURE;
                     }
                 }
             }
             a if a.starts_with('-') => {
-                eprintln!("texcraft-cli: unknown option {a}");
+                eprintln!("warraqcraft-cli: unknown option {a}");
                 return ExitCode::FAILURE;
             }
             a => {
                 if name.is_some() {
-                    eprintln!("texcraft-cli: unexpected argument {a}");
+                    eprintln!("warraqcraft-cli: unexpected argument {a}");
                     return ExitCode::FAILURE;
                 }
                 name = Some(a);
@@ -393,7 +393,7 @@ fn ui_cmd(args: &[String]) -> ExitCode {
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("texcraft-cli ui: {e}");
+                eprintln!("warraqcraft-cli ui: {e}");
                 ExitCode::FAILURE
             }
         },
@@ -409,7 +409,7 @@ fn ui_cmd(args: &[String]) -> ExitCode {
 fn ui_request(control_file: &str, cmd: &str, params: Value) -> Result<String, String> {
     use std::io::{BufRead, BufReader, Write};
     let raw = std::fs::read_to_string(control_file)
-        .map_err(|e| format!("cannot read {control_file}: {e} — start the app with `texcraft --control {control_file}`"))?;
+        .map_err(|e| format!("cannot read {control_file}: {e} — start the app with `warraqcraft --control {control_file}`"))?;
     let info: Value = serde_json::from_str(&raw).map_err(|e| format!("{control_file}: not a control file: {e}"))?;
     let port = info.get("port").and_then(Value::as_u64).ok_or("control file missing \"port\"")?;
     let token = info.get("token").and_then(Value::as_str).ok_or("control file missing \"token\"")?.to_string();

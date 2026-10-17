@@ -235,7 +235,7 @@ pub fn math_span(src: &str, ci: usize) -> Option<(usize, usize)> {
 }
 
 /// The engine's `math.preview` always writes the same scratch file
-/// (`<doc-dir>/.texcraft/preview/m.tex`), so fragment compiles are
+/// (`<doc-dir>/.warraqcraft/preview/m.tex`), so fragment compiles are
 /// serialized here — concurrent workers would clobber each other's PDF.
 #[cfg(not(target_arch = "wasm32"))]
 static PREVIEW_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -246,7 +246,7 @@ static PREVIEW_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(not(target_arch = "wasm32"))]
 fn compile_preview(latex: &str) -> Result<egui::ColorImage, String> {
     let _guard = PREVIEW_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut session = texcraft_engine::Session::new();
+    let mut session = warraqcraft_engine::Session::new();
     let out = session.execute("math.preview", &serde_json::json!({"latex": latex})).map_err(|e| e.to_string())?;
     match out.get("pdf").and_then(serde_json::Value::as_str) {
         Some(pdf) => render_first_page(std::path::Path::new(pdf), PREVIEW_SCALE),
@@ -319,7 +319,7 @@ impl MathPreview {
     }
 
     /// Queue a preview compile for `latex` if not cached/pending.
-    /// Worker: scratch `texcraft_engine::Session`, `math.preview`,
+    /// Worker: scratch `warraqcraft_engine::Session`, `math.preview`,
     /// rasterize page 0 of the returned pdf path.
     ///
     /// Skipped while ≥ [`MAX_PENDING`] compiles are in flight, for a

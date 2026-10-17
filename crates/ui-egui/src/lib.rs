@@ -1,17 +1,17 @@
-//! TexCraft Studio — egui front end.
+//! WarraqCraft Studio — egui front end.
 //!
 //! LocalLeaf-style three-pane layout: project file tree + document
 //! outline on the left, a syntax-highlighted `.tex` editor with gutter
 //! and status bar in the center, and a hayro-rendered PDF preview on the
 //! right. `document.compile` (crates/engine) shells out to a system TeX
-//! engine (never shell-escape) into `.texcraft/`; pages are rasterized
+//! engine (never shell-escape) into `.warraqcraft/`; pages are rasterized
 //! on a worker thread.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod ai;
 mod cite;
-/// Opt-in TCP control channel (`texcraft --control FILE`, native only).
+/// Opt-in TCP control channel (`warraqcraft --control FILE`, native only).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod control;
 mod edits;
@@ -28,8 +28,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use egui::text::{CCursor, CCursorRange};
-use texcraft_engine::{CompileReport, Session};
 use texparse::DocStructure;
+use warraqcraft_engine::{CompileReport, Session};
 
 const DEFAULT_DOC: &str = "\\documentclass{article}\n\\usepackage{amsmath}\n\n\\title{Untitled}\n\\author{}\n\n\\begin{document}\n\\maketitle\n\n\\section{Introduction}\n\n\\end{document}\n";
 
@@ -64,7 +64,7 @@ enum Zoom {
 }
 
 impl Zoom {
-    /// Stable string form for `TexPrefs::zoom`.
+    /// Stable string form for `WarraqPrefs::zoom`.
     fn pref(&self) -> String {
         match self {
             Zoom::FitWidth => "fit-width".into(),
@@ -73,7 +73,7 @@ impl Zoom {
         }
     }
 
-    /// Parse `TexPrefs::zoom`; unknown values fall back to fit-width.
+    /// Parse `WarraqPrefs::zoom`; unknown values fall back to fit-width.
     fn from_pref(s: &str) -> Zoom {
         match s {
             "fit-page" => Zoom::FitPage,
@@ -131,7 +131,7 @@ impl PageMode {
 /// order isn't stable), and the auto-compile toggle.
 #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
 #[serde(default)]
-struct TexPrefs {
+struct WarraqPrefs {
     dark: bool,
     autocompile: bool,
     engine: String,
@@ -148,7 +148,7 @@ struct TexPrefs {
     ai_model: String,
 }
 
-impl Default for TexPrefs {
+impl Default for WarraqPrefs {
     fn default() -> Self {
         Self {
             dark: true,
@@ -166,8 +166,8 @@ impl Default for TexPrefs {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl craft_settings::Settings for TexPrefs {
-    const APP_ID: &'static str = "texcraft";
+impl craft_settings::Settings for WarraqPrefs {
+    const APP_ID: &'static str = "warraqcraft";
     const SCHEMA_VERSION: u32 = 1;
 
     fn migrate(_from: u32, _doc: &mut craft_settings::DocumentMut) -> Result<(), craft_settings::MigrateError> {
@@ -178,21 +178,21 @@ impl craft_settings::Settings for TexPrefs {
 /// Native: the real craft-settings store (platform config dir, atomic
 /// TOML writes, backup + recovery).
 #[cfg(not(target_arch = "wasm32"))]
-type PrefsStore = craft_settings::SettingsStore<TexPrefs>;
+type PrefsStore = craft_settings::SettingsStore<WarraqPrefs>;
 
 /// Wasm: craft-settings' persistent store doesn't exist there — a
 /// same-shaped in-memory stub keeps the call sites unconditional.
 #[cfg(target_arch = "wasm32")]
 #[derive(Default)]
-struct PrefsStore(TexPrefs);
+struct PrefsStore(WarraqPrefs);
 
 #[cfg(target_arch = "wasm32")]
 impl PrefsStore {
-    fn get(&self) -> &TexPrefs {
+    fn get(&self) -> &WarraqPrefs {
         &self.0
     }
 
-    fn update(&mut self, f: impl FnOnce(&mut TexPrefs)) -> bool {
+    fn update(&mut self, f: impl FnOnce(&mut WarraqPrefs)) -> bool {
         f(&mut self.0);
         true
     }
@@ -206,7 +206,7 @@ impl PrefsStore {
 fn open_prefs() -> PrefsStore {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        craft_settings::SettingsStore::<TexPrefs>::open(craft_settings::Location::Auto).0
+        craft_settings::SettingsStore::<WarraqPrefs>::open(craft_settings::Location::Auto).0
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -257,7 +257,7 @@ struct Completion {
 type ToolJob = Result<serde_json::Value, String>;
 
 /// The studio application state.
-pub struct TexApp {
+pub struct WarraqApp {
     session: Session,
     doc: DocStructure,
     status: String,
@@ -380,12 +380,12 @@ pub struct TexApp {
 }
 const AUTOCOMPILE_IDLE_SECS: f64 = 5.0;
 
-impl TexApp {
+impl WarraqApp {
     /// Create the app; `file` (optional) is opened at startup.
     pub fn new(_cc: &eframe::CreationContext<'_>, file: Option<PathBuf>) -> Self {
         let settings = open_prefs();
         theme::apply(&_cc.egui_ctx, settings.get().dark);
-        let mut app = TexApp {
+        let mut app = WarraqApp {
             session: Session::new(),
             doc: DocStructure::default(),
             status: String::new(),
@@ -471,7 +471,7 @@ impl TexApp {
         app.session = Session::with_source(DEFAULT_DOC.to_string());
         #[cfg(not(target_arch = "wasm32"))]
         {
-            app.engines = texcraft_engine::detect_engines();
+            app.engines = warraqcraft_engine::detect_engines();
             app.engine_sel = app.engines.iter().position(|e| *e == p.engine);
         }
         match file {
@@ -481,7 +481,7 @@ impl TexApp {
         app
     }
 
-    /// Attach a started control channel (`texcraft --control FILE`).
+    /// Attach a started control channel (`warraqcraft --control FILE`).
     /// `ctx` lets connection threads wake the UI so a reply doesn't
     /// wait for the next input event.
     #[cfg(not(target_arch = "wasm32"))]
@@ -508,7 +508,7 @@ impl TexApp {
             self.status = "compile first — no PDF to print".into();
             return;
         };
-        let title = pdf.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "texcraft".into());
+        let title = pdf.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "warraqcraft".into());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let res = std::fs::read(&pdf)
@@ -625,26 +625,26 @@ impl TexApp {
         self.status = "save-as is not available on the web build".into();
     }
 
-    /// Load project user tools from `texcraft-tools.json` next to the
+    /// Load project user tools from `warraqcraft-tools.json` next to the
     /// open document — the same JSON shape `user_tool.set` accepts:
     /// `{"tools": [{"name": "…", "argv": ["…"], "cwd"?: "…", "capture"?: bool}]}`.
     /// Missing/invalid files are silent; a parse error surfaces in the
     /// status line.
     #[cfg(not(target_arch = "wasm32"))]
     fn load_tools(&mut self) {
-        let file = self.project_root().join("texcraft-tools.json");
+        let file = self.project_root().join("warraqcraft-tools.json");
         let Ok(text) = std::fs::read_to_string(&file) else { return };
         match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(v) => match self.session.execute("user_tool.set", &v) {
                 Ok(_) => {
                     let n = self.session.user_tools().len();
                     if n > 0 {
-                        self.status = format!("{n} user tool{} from texcraft-tools.json", if n == 1 { "" } else { "s" });
+                        self.status = format!("{n} user tool{} from warraqcraft-tools.json", if n == 1 { "" } else { "s" });
                     }
                 }
-                Err(e) => self.status = format!("texcraft-tools.json: {e}"),
+                Err(e) => self.status = format!("warraqcraft-tools.json: {e}"),
             },
-            Err(e) => self.status = format!("texcraft-tools.json: {e}"),
+            Err(e) => self.status = format!("warraqcraft-tools.json: {e}"),
         }
     }
 
@@ -656,7 +656,7 @@ impl TexApp {
     /// placeholder substitution and safety rules apply unchanged.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_tool(&mut self, name: String) {
-        let tools: Vec<texcraft_engine::UserTool> = self.session.user_tools().to_vec();
+        let tools: Vec<warraqcraft_engine::UserTool> = self.session.user_tools().to_vec();
         let path = self.session.path().map(Path::to_path_buf);
         self.status = format!("running {name}…");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -923,7 +923,7 @@ impl TexApp {
             .nth(line.saturating_sub(1))
             .map(|l| l.chars().take(col.saturating_sub(1)).map(|c| c.len_utf8()).sum::<usize>() + 1)
             .unwrap_or(col);
-        match texcraft_engine::synctex::forward(&pdf, &src, line as u32, byte_col as u32) {
+        match warraqcraft_engine::synctex::forward(&pdf, &src, line as u32, byte_col as u32) {
             Ok(locs) => match locs.first() {
                 Some(loc) => {
                     self.page_idx = (loc.page as usize).saturating_sub(1).min(self.pages.len().saturating_sub(1));
@@ -946,7 +946,7 @@ impl TexApp {
         let (Some(pdf), Some(pt)) = (self.pdf_path.clone(), self.page_pts.get(self.page_idx).copied()) else { return };
         let frac = (pos - page_rect.min) / page_rect.size();
         let (x, y) = ((frac.x * pt.x) as f64, (frac.y * pt.y) as f64);
-        match texcraft_engine::synctex::inverse(&pdf, (self.page_idx + 1) as u32, x, y) {
+        match warraqcraft_engine::synctex::inverse(&pdf, (self.page_idx + 1) as u32, x, y) {
             Ok(Some(loc)) => {
                 // synctex reports absolute paths; compare canonicalized.
                 let cur = self.session.path().and_then(|p| p.canonicalize().ok());
@@ -1193,7 +1193,7 @@ impl TexApp {
                         }
                         ui.separator();
                         ui.checkbox(&mut self.autocompile, "auto-compile after 5 s idle");
-                        // User tools from texcraft-tools.json — fixed-argv
+                        // User tools from warraqcraft-tools.json — fixed-argv
                         // external commands run on a worker (M2 surface).
                         #[cfg(not(target_arch = "wasm32"))]
                         {
@@ -2505,7 +2505,7 @@ impl TexApp {
     }
 }
 
-/// F12 → capture the window to `texcraft-shot.png` in the cwd (this is
+/// F12 → capture the window to `warraqcraft-shot.png` in the cwd (this is
 /// also the future `ui.screenshot` control-channel implementation).
 #[cfg(not(target_arch = "wasm32"))]
 fn handle_screenshot(ctx: &egui::Context) {
@@ -2523,7 +2523,7 @@ fn handle_screenshot(ctx: &egui::Context) {
             .collect()
     });
     for img in shots {
-        let path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("texcraft-shot.png");
+        let path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("warraqcraft-shot.png");
         let [w, h] = img.size;
         if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, img.as_raw().to_vec()) {
             let _ = buf.save(&path);
@@ -2888,7 +2888,7 @@ fn file_declares_document(path: &Path) -> bool {
 /// page into an `egui::ColorImage` with `hayro`.
 #[cfg(not(target_arch = "wasm32"))]
 fn compile_and_render(path: &Path, engine: Option<&str>) -> CompileJob {
-    let report = texcraft_engine::compile_file_with(path, None, engine).map_err(|e| e.to_string())?;
+    let report = warraqcraft_engine::compile_file_with(path, None, engine).map_err(|e| e.to_string())?;
     let Some(pdf_path) = &report.pdf else { return Ok((report, Vec::new())) };
 
     let data = std::fs::read(pdf_path).map_err(|e| format!("cannot read {}: {e}", pdf_path.display()))?;
@@ -2991,7 +2991,7 @@ mod tests {
     }
 }
 
-impl eframe::App for TexApp {
+impl eframe::App for WarraqApp {
     /// Non-painting work — runs every frame, also while the window is
     /// minimized or hidden (a finished compile still drains there).
     /// `craft_quit::on_close_request` stays last: it quits through the

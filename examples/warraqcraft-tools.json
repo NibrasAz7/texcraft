@@ -1,13 +1,13 @@
 {
   "tools": [
     {
-      "name": "BibTeX (.texcraft)",
-      "argv": ["bibtex", ".texcraft/{stem}"],
+      "name": "BibTeX (.warraqcraft)",
+      "argv": ["bibtex", ".warraqcraft/{stem}"],
       "capture": true
     },
     {
-      "name": "MakeIndex (.texcraft)",
-      "argv": ["makeindex", ".texcraft/{stem}.idx"],
+      "name": "MakeIndex (.warraqcraft)",
+      "argv": ["makeindex", ".warraqcraft/{stem}.idx"],
       "capture": true
     },
     {

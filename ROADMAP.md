@@ -1,16 +1,16 @@
-# TexCraft roadmap
+# WarraqCraft roadmap
 
 **Stage: M0 — scaffold and parsing core.** The crate sketch and product
 description are in `README.md`. Open decisions (engine option B vs A′ —
 A′ now means building on MIT-licensed `texlang`/`boxworks` from
-jamespfennell/texcraft, bibliography backend, history backend, editor
+jamespfennell/warraqcraft, bibliography backend, history backend, editor
 widget) are tracked there — nothing in M0 depends on them.
 
 ## Milestones
 
 | Id | Scope | Status |
 | --- | --- | --- |
-| M0 | Repo scaffold (workspace, lints, xtask, AGENTS) + `texparse` (.tex lexer, structure scan, .bib parser) + `texcraft-cli parse/bib/check` | done |
+| M0 | Repo scaffold (workspace, lints, xtask, AGENTS) + `texparse` (.tex lexer, structure scan, .bib parser) + `warraqcraft-cli parse/bib/check` | done |
 | M1 | Engine decision landed; `texpkg` curated package set; minimal compile pipeline (`document.compile`) | in progress — system-TeX + bundled tectonic (B-lite) done; `texpkg` open |
 | M2 | `engine` command registry + Session; CLI `--cmd` surface | in progress — Session + execute() landed; `--cmd`/control next |
 | M3 | `ui-egui` studio: project tree, editor, PDF preview, SyncTeX nav | in progress — IDE shell, editor, PDF preview and SyncTeX click-through done; project-wide awareness next |
@@ -24,27 +24,27 @@ widget) are tracked there — nothing in M0 depends on them.
   theme toggle.
 - M0.6 — `crates/engine` (Session + `execute()`, first commands) and a
   working PDF preview: system-TeX compile (`xelatex`/`lualatex`/`pdflatex`
-  on PATH, `.texcraft/` build dir, no shell escape, bibtex pass when a
+  on PATH, `.warraqcraft/` build dir, no shell escape, bibtex pass when a
   bibliography exists), hayro rasterizes pages in the preview pane.
-  `texcraft-cli compile` added. Repo published to `NibrasAz7/texcraft`.
+  `warraqcraft-cli compile` added. Repo published to `NibrasAz7/warraqcraft`.
 - M0.7 — reconnaissance: observation-level REA/Ghidra survey of an
   installed TeXstudio (feature/subsystem inventory — BuildManager command
   constants, LatexDocument/LatexParser IDE model, QSynctex, BibTeXDialog;
-  no implementation copied) and analysis of jamespfennell/texcraft (MIT),
+  no implementation copied) and analysis of jamespfennell/warraqcraft (MIT),
   validated by a spike that embedded `texlang` via git dep and ran real
   TeX semantics (def/registers/ifs/csname/input, caret diagnostics; one
   gap: unbounded expansion stack → worker thread required). Plan updated:
   C live, B shipping, A′ = own typesetter on texlang/boxworks.
 - M0.8 — LocalLeaf recon (MIT, github.com/leoaliperti/LocalLeaf — a
-  shipped local-first Overleaf-style editor, `texcraft-core` Rust core +
+  shipped local-first Overleaf-style editor, `warraqcraft-core` Rust core +
   Tauri/Vue/CodeMirror/PDF.js frontend). Technique-level adoptions into
   `engine`: log-driven rerun loop (cross-refs resolve without a
   bibliography now), artifact-driven bibliography (`.bcf`→biber,
   `.aux \bibdata`→bibtex, `BIBINPUTS`/`BSTINPUTS`), and a `synctex`
   module wrapping the distro `synctex` CLI for source↔PDF jumps
   (verified on MiKTeX both directions). Their MCP surface
-  (compile/read/write/list-engines) informs M2. Name note: "texcraft"
-  is now taken twice (JF crate + LocalLeaf's `texcraft-core`).
+  (compile/read/write/list-engines) informs M2. Name note: "warraqcraft"
+  is now taken twice (JF crate + LocalLeaf's `warraqcraft-core`).
 - M3.1 — LocalLeaf-style IDE shell: dark palette, file-tree sidebar with
   main-doc star, guttered lexer-driven syntax highlighting, PDF preview
   toolbar (pager, zoom, fit), togglable outline + logs panels, status
@@ -78,7 +78,7 @@ widget) are tracked there — nothing in M0 depends on them.
   * engine `tools.rs` — `user_tool.set/list/run/clear`: fixed-argv
     spawn (no shell), `{file}/{dir}/{stem}/{basename}` placeholders,
     60 s timeout + kill, 256 KiB drained output cap. UI loads
-    `texcraft-tools.json` per project; demo file in examples/.
+    `warraqcraft-tools.json` per project; demo file in examples/.
   * ui-egui — full block folding (heading/env regions, derived folded
     buffer, source-coordinate remapping); line ops Ctrl+D/Alt+↑↓/
     Ctrl+//Ctrl+Shift+K/Ctrl+Shift+Bksp; compile errors→gutter dots+
@@ -92,7 +92,7 @@ widget) are tracked there — nothing in M0 depends on them.
   * engine `templates.rs` + `history.rs` — `template.list/read/new`
     over a shipped `templates/` dir (article, report, letter, beamer,
     arabdoc polyglossia+xelatex); `project.snapshot` local history
-    (`.texcraft/snapshots/<ts>/`, atomic restore, confirm-gated).
+    (`.warraqcraft/snapshots/<ts>/`, atomic restore, confirm-gated).
   * ui-egui `cite.rs` — insert-cite dialog (Ctrl+Shift+C / cite
     button): project .bib scan via parse_bib, filter+keyboard nav,
     merges into existing `\cite{…}`; template picker in the tree
@@ -116,12 +116,12 @@ widget) are tracked there — nothing in M0 depends on them.
 - M2 — control surface (headless reachability for all engine commands):
   * `crates/mcp` (new, L6) — opt-in stdio MCP server (NDJSON JSON-RPC,
     no port): initialize/ping/tools·list/tools·call/resources; 21 tools
-    map 1:1 to Session::execute; read-only texcraft://doc/* resources;
-    >4 MiB lines capped. `texcraft-cli mcp` launches it.
-  * `texcraft-cli cmd`/`--cmd` — generic engine passthrough
+    map 1:1 to Session::execute; read-only warraqcraft://doc/* resources;
+    >4 MiB lines capped. `warraqcraft-cli mcp` launches it.
+  * `warraqcraft-cli cmd`/`--cmd` — generic engine passthrough
     (--file/--params/--check) + `commands` listing.
   * `--control FILE` — opt-in loopback TCP channel on the GUI: 128-bit
     token in an owner-only control file (staged write, no symlink
     follow), per-request-token NDJSON requests drained through
     logic(), oneshot replies, 64 in-flight cap. Client:
-    `texcraft-cli ui --control FILE <cmd> [--params]`.
+    `warraqcraft-cli ui --control FILE <cmd> [--params]`.

@@ -1,10 +1,10 @@
 //! `project.snapshot` local history: a snapshot is a full copy of the
-//! project's text sources under `.texcraft/snapshots/<id>/`, where the
+//! project's text sources under `.warraqcraft/snapshots/<id>/`, where the
 //! project root is the open file's directory.
 //!
 //! Sources = `*.tex`, `*.bib`, `*.sty`, `*.cls`, `*.txt`, `*.toml`
 //! directly under the root and one level of subdirectories — walk
-//! depth ≤ 2, capped at 512 files, `.texcraft/` itself excluded, files
+//! depth ≤ 2, capped at 512 files, `.warraqcraft/` itself excluded, files
 //! over 1 MiB skipped. `<id>` is a `%Y%m%d-%H%M%S` UTC timestamp with
 //! `-2`, `-3` collision suffixes; each snapshot carries a `meta.json`
 //! (`{"id","ts","label","files"}`) beside the copied tree.
@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::{templates::valid_id, EngineError, Session};
 
-/// Snapshot store inside the project's `.texcraft/` build dir.
+/// Snapshot store inside the project's `.warraqcraft/` build dir.
 const SNAPSHOTS: &str = "snapshots";
 /// Source extensions eligible for snapshots (case-insensitive).
 const SOURCE_EXTS: [&str; 6] = ["tex", "bib", "sty", "cls", "txt", "toml"];
@@ -45,6 +45,7 @@ fn project_root(session: &Session) -> Result<PathBuf, EngineError> {
 }
 
 fn snapshots_dir(root: &Path) -> PathBuf {
+    crate::migrate_legacy_dir(root);
     root.join(crate::BUILD_DIR).join(SNAPSHOTS)
 }
 
@@ -85,7 +86,7 @@ fn walk_files(dir: &Path, depth: u32, cap: usize) -> Vec<PathBuf> {
 }
 
 /// Is `rel` a snapshot-worthy source file? Extension allow-list, size
-/// cap, and never inside the `.texcraft/` build dir itself.
+/// cap, and never inside the `.warraqcraft/` build dir itself.
 fn is_source(rel: &Path, abs: &Path) -> bool {
     if rel.components().next() == Some(std::path::Component::Normal(std::ffi::OsStr::new(crate::BUILD_DIR))) {
         return false;
@@ -278,7 +279,7 @@ mod tests {
     impl TempDir {
         fn new(tag: &str) -> Self {
             let n = NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("texcraft-history-test-{}-{tag}-{n}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("warraqcraft-history-test-{}-{tag}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -351,11 +352,11 @@ mod tests {
     }
 
     #[test]
-    fn skips_texcraft_dir_and_big_files() {
+    fn skips_warraqcraft_dir_and_big_files() {
         let dir = TempDir::new("skips");
         let mut s = fixture(&dir.0);
-        std::fs::create_dir_all(dir.0.join(".texcraft")).unwrap();
-        std::fs::write(dir.0.join(".texcraft").join("build.tex"), "junk\n").unwrap();
+        std::fs::create_dir_all(dir.0.join(".warraqcraft")).unwrap();
+        std::fs::write(dir.0.join(".warraqcraft").join("build.tex"), "junk\n").unwrap();
         std::fs::write(dir.0.join("big.tex"), vec![b'x'; MAX_FILE_BYTES as usize + 1]).unwrap();
         std::fs::write(dir.0.join("image.png"), vec![0u8; 8]).unwrap(); // not a source ext
 
@@ -364,7 +365,7 @@ mod tests {
         let read = s.execute("snapshot.read", &json!({"id": snap["id"]})).unwrap();
         let files = read["files"].as_object().unwrap();
         assert!(!files.contains_key("big.tex"));
-        assert!(!files.keys().any(|k| k.contains(".texcraft")));
+        assert!(!files.keys().any(|k| k.contains(".warraqcraft")));
         assert!(!files.contains_key("image.png"));
     }
 

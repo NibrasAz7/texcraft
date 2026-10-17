@@ -1,4 +1,8 @@
-# TexCraft — product description
+# WarraqCraft — product description
+
+*Named after the* warrāq *(ورّاق) — the paper-makers, copyists and
+bookbinders of the medieval Islamic manuscript trade. The craft of the
+printed page, a thousand years before TeX.*
 
 Clean-room, Rust-native LaTeX authoring and typesetting environment — the
 LaTeX-class member of the ArtCraft family. Think *Overleaf-class UX on the
@@ -23,9 +27,9 @@ templates. See [`ROADMAP.md`](ROADMAP.md) for the milestone plan.
 
 ## What it is
 
-A user writes LaTeX; TexCraft keeps a real PDF preview one keystroke away.
+A user writes LaTeX; WarraqCraft keeps a real PDF preview one keystroke away.
 Everything that makes Overleaf comfortable is in scope — and the UI goes
-further: Overleaf's chrome is a decade old; TexCraft targets a **modern,
+further: Overleaf's chrome is a decade old; WarraqCraft targets a **modern,
 themeable design language** from day one.
 
 - **Themes, not a toggle** — a real theme system (`theme::Tokens`, the
@@ -76,7 +80,7 @@ themeable design language** from day one.
 ## Reference-management integration (headline feature)
 
 Overleaf's integration panel (Zotero, Mendeley, ReadCube, GitHub,
-Dropbox) is the model — but TexCraft's is better for local-first users:
+Dropbox) is the model — but WarraqCraft's is better for local-first users:
 
 - **Zotero** — live integration via the local HTTP API
   (`localhost:23119`) and **Better BibTeX** auto-export: point the
@@ -96,7 +100,7 @@ Dropbox) is the model — but TexCraft's is better for local-first users:
 
 ## Arabic & RTL — the built-in advantage
 
-No LaTeX IDE treats Arabic as a first-class citizen. TexCraft does,
+No LaTeX IDE treats Arabic as a first-class citizen. WarraqCraft does,
 because the family already owns the hard parts:
 
 - **`arabdoc` bundled** — the maintainer's own CTAN package
@@ -104,7 +108,7 @@ because the family already owns the hard parts:
   LPPL): `arabdoc-setup` collapses the fragile 15–25-line bidi/
   polyglossia/fontspec preamble into one `\usepackage`;
   `arabdoc-article/book/thesis/report` classes, `arabdoc-glossary`
-  and `arabdoc-bib` (Arabic biblatex styles). Ships inside TexCraft
+  and `arabdoc-bib` (Arabic biblatex styles). Ships inside WarraqCraft
   and is the reference for the app's RTL diagnostics — the editor can
   *catch* the classic `bidi loaded after X` ordering bug, not just
   report it.
@@ -119,7 +123,7 @@ because the family already owns the hard parts:
   v1.1.0 — the Seven Canonical Books, ~36,400 hadiths with tashkeel,
   English translations and grades, on-demand chapter loading), plus
   the CTAN `quran` package ecosystem (translations into 15+
-  languages). TexCraft ships these as first-class builtins, not
+  languages). WarraqCraft ships these as first-class builtins, not
   optional downloads.
 - **Template intelligence** — the editor knows the arabdoc option set
   (`amiri`/`scheherazade`, `maghrib`/`arabicdigits`, `gregorian`/
@@ -127,7 +131,7 @@ because the family already owns the hard parts:
 
 ## Template gallery — content is the moat
 
-Overleaf's gallery is a large part of why people choose it. TexCraft's
+Overleaf's gallery is a large part of why people choose it. WarraqCraft's
 answer is three-layered, and the middle layer is uniquely ours:
 
 1. **In-house library** — two collections, same author, both shippable:
@@ -142,7 +146,7 @@ answer is three-layered, and the middle layer is uniquely ours:
    Italian and more; the gallery UI filters by document language and
    bidi needs, not just document type.
 3. **Overleaf-gallery compatible** — gallery/CTAN templates are plain
-   LaTeX source; TexCraft's template loader consumes the same
+   LaTeX source; WarraqCraft's template loader consumes the same
    "folder of .tex/.sty + metadata" shape, so users can drop in a
    downloaded Overleaf template and it just opens. A curated subset
    (LPPL/CC-BY licensed ones) can ship pre-vetted.
@@ -157,12 +161,12 @@ answer is three-layered, and the middle layer is uniquely ours:
 - **No panics in shipped code**; untrusted `.tex`/`.bib` input is fuzzed
   (LaTeX input is famously adversarial — `\write18`-style constructs are
   always disabled).
-- **`texcraft-cli`** — headless: `texcraft-cli run main.tex`,
-  `texcraft-cli --cmd 'document.compile {}'`, `functions`, `mcp`.
+- **`warraqcraft-cli`** — headless: `warraqcraft-cli run main.tex`,
+  `warraqcraft-cli --cmd 'document.compile {}'`, `functions`, `mcp`.
 - **Thin UI** — egui studio over the command layer; JSON-lines TCP
   control channel (`engine.execute`, `ui.state`, `ui.render`,
   `ui.screenshot`, `ping`) like every sibling.
-- **Packaging** — WiX MSI + portable zip, `C:\Program Files\TexCraft`;
+- **Packaging** — WiX MSI + portable zip, `C:\Program Files\WarraqCraft`;
   entry in the `artcraft-cli` skill and a numbered demo project.
 
 ## The hard problem: the typesetting engine (open decision)
@@ -174,7 +178,7 @@ The family convention is clean-room-from-scratch, but TeX is special:
 | **A. Own TeX-subset typesetter** | clean-room, consistent with family | Huge: line breaking (Knuth–Plass is published), boxes/glue, math layout (appendix G is published). Years, not months — but we control everything (incremental retypeset, human-readable errors, clean wasm), and never touch GPL. |
 | **B. Vendor the Tectonic core** | MIT — Tectonic already excised XeTeX's GPL/LGPL parts (kpathsea, poppler) and de-web2c'd the engine for Rust | Real Unicode TeX fast, **already Rust-hosted**, already handles Arabic via fontspec/bidi — exactly what arabdoc needs. Still a borrowed engine: no incremental typesetting, cryptic-error surface unchanged. **pdfTeX, LuaTeX, BibTeX, biber stay banned (GPL).** |
 | **C. Wrap system TeX Live / MiKTeX** | zero shipped code | Nothing works out of the box without a 5 GB distro; fine as an *escape hatch* toggle ("use system TeX"), bad as the only path. **Now working** (M0.6): `document.compile` probes MiKTeX/TeX Live, full bibtex passes, hayro-rasterized preview. |
-| **D. Build on `texlang`/`boxworks` (jamespfennell/texcraft)** | MIT | Existing "LLVM-style" modular TeX reimplementation in Rust: `texlang` (tokenizer, catcodes, real macro expansion, registers, conditionals — benchmarks ~5% slower than pdfTeX), `boxworks`+`-knuthplass`+`-hyphenate` (boxes/glue, line breaking), `tfm`, `dvi`. WASM-proven (play.texcraft.dev), `FileSystem`-trait embedding. **Gaps (verified by spike):** no e-TeX primitives so `latex.ltx` can't run, no shipout pipeline, no math typesetting — it executes TeX, doesn't yet emit pages. |
+| **D. Build on `texlang`/`boxworks` (jamespfennell/warraqcraft)** | MIT | Existing "LLVM-style" modular TeX reimplementation in Rust: `texlang` (tokenizer, catcodes, real macro expansion, registers, conditionals — benchmarks ~5% slower than pdfTeX), `boxworks`+`-knuthplass`+`-hyphenate` (boxes/glue, line breaking), `tfm`, `dvi`. WASM-proven (play.warraqcraft.dev), `FileSystem`-trait embedding. **Gaps (verified by spike):** no e-TeX primitives so `latex.ltx` can't run, no shipout pipeline, no math typesetting — it executes TeX, doesn't yet emit pages. |
 
 Spike result (validated by embedding, ~50 lines, git-dep pinned):
 `texlang` + `texlang-stdlib` run real TeX semantics from our own process —
@@ -194,9 +198,9 @@ depend instead of copy. The differentiation analysis says the moat is the
 family pipeline + RTL + templates, not engine ownership, so B/C buy the
 product while A′ matures. Knuth–Plass line breaking and math typesetting
 are published algorithms — clean-room is legitimate; the "TeX" name is
-not claimed (name-restriction), product stays "TexCraft, LaTeX-compatible".
+not claimed (name-restriction), product stays "WarraqCraft, LaTeX-compatible".
 
-Note: "texcraft" (crate, repo, texcraft.dev) is already the JF project's
+Note: "warraqcraft" (crate, repo, warraqcraft.dev) is already the JF project's
 name — a product rename decision is deferred to before public v1.
 
 Bibliography: implement BibTeX-semantics ourselves (the .bst stack
@@ -214,13 +218,13 @@ crates/texpkg     — package/class registry + loader, L3
 crates/engine     — command registry + Session guard, L5
 crates/mcp        — JSON-RPC stdio server, L6
 crates/ui-egui    — studio UI, L6
-apps/texcraft-cli — headless CLI, L7
-apps/texcraft     — studio app + TCP control server, L7
+apps/warraqcraft-cli — headless CLI, L7
+apps/warraqcraft     — studio app + TCP control server, L7
 ```
 
 ## Screen-by-screen scope (from the Overleaf reference)
 
-| Screen | TexCraft equivalent |
+| Screen | WarraqCraft equivalent |
 | --- | --- |
 | Project editor (file tree / editor / PDF) | Studio main window — three-dock layout, resizable |
 | Projects dashboard | Launcher/home view: recent projects, new-from-template, search, tags |
@@ -245,12 +249,12 @@ apps/texcraft     — studio app + TCP control server, L7
 3. History: bundle a tiny git backend vs own snapshot format?
 4. Editor: egui `TextEdit` (consistent, limited) vs a richer editor
    widget crate — syntax highlighting is needed regardless.
-5. Name: **decision deferred to before public v1.** "texcraft" is taken
-   (jamespfennell's project — crates.io, GitHub, texcraft.dev), separate
-   from the TeX-trademark naming rule ("TexCraft" is a distinct product
+5. Name: **decision deferred to before public v1.** "warraqcraft" is taken
+   (jamespfennell's project — crates.io, GitHub, warraqcraft.dev), separate
+   from the TeX-trademark naming rule ("WarraqCraft" is a distinct product
    name, not claiming to be TeX — same convention as "MATLAB-class"
-   wording). A rename also avoids `texcraft.exe` colliding with their
-   `texcraft` CLI if we depend on their crates.
+   wording). A rename also avoids `warraqcraft.exe` colliding with their
+   `warraqcraft` CLI if we depend on their crates.
 6. Template-library licensing: `Templates/` is already LPPL-1.3c —
    clean to ship. The `arabic-template` collection's skill wrapper is
    CC-BY-NC-4.0, but the maintainer owns it — relicensing the bundled

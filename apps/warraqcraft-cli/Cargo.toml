@@ -1,0 +1,19 @@
+[package]
+name = "warraqcraft-cli"
+description = "WarraqCraft from the command line: parse .tex structure, inspect .bib files, check documents."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "warraqcraft-cli"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+texparse = { path = "../../crates/texparse" }
+warraqcraft-engine = { path = "../../crates/engine" }
+warraqcraft-mcp = { path = "../../crates/mcp" }

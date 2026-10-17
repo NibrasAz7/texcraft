@@ -86,7 +86,7 @@ pub struct SpellCheck {
 }
 
 impl SpellCheck {
-    /// Load `dicts/en_US.{aff,dic}` — searches `TEXCRAFT_DICTS` first,
+    /// Load `dicts/en_US.{aff,dic}` — searches `WARRAQCRAFT_DICTS` first,
     /// then `dicts/` next to the exe and `dicts/` in every ancestor of
     /// the exe dir (dev checkouts: workspace-root `dicts/`). Missing or
     /// unparseable files leave the checker unavailable — never an error.
@@ -407,12 +407,12 @@ impl Scan<'_> {
 }
 
 /// Native: first `en_US.aff`+`en_US.dic` pair that parses wins.
-/// Candidates: `$TEXCRAFT_DICTS`, then `dicts/` next to the exe and in
+/// Candidates: `$WARRAQCRAFT_DICTS`, then `dicts/` next to the exe and in
 /// every ancestor of the exe dir (dev checkouts: workspace-root dicts/).
 #[cfg(not(target_arch = "wasm32"))]
 fn load_dict() -> Option<spellbook::Dictionary> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(env) = std::env::var_os("TEXCRAFT_DICTS") {
+    if let Some(env) = std::env::var_os("WARRAQCRAFT_DICTS") {
         dirs.push(PathBuf::from(env));
     }
     if let Ok(exe) = std::env::current_exe() {

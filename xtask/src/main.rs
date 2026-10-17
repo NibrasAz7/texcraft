@@ -56,9 +56,9 @@ fn layers() -> ExitCode {
             "typeset" => 1,
             "texpdf" | "texbib" => 2,
             "texpkg" => 3,
-            "engine" | "texcraft_engine" => 5,
-            "mcp" | "ui-egui" | "texcraft_mcp" | "texcraft_ui_egui" => 6,
-            n if n.ends_with("-cli") || n == "texcraft" || n == "texcraft-web" => 7,
+            "engine" | "warraqcraft_engine" => 5,
+            "mcp" | "ui-egui" | "warraqcraft_mcp" | "warraqcraft_ui_egui" => 6,
+            n if n.ends_with("-cli") || n == "warraqcraft" || n == "warraqcraft-web" => 7,
             _ => return None,
         })
     };

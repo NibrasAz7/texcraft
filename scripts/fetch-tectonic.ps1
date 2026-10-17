@@ -1,6 +1,6 @@
 # fetch-tectonic.ps1 — download the Tectonic binary into bin/ for the
 # bundled-engine (Track B-lite) path. Tectonic is MIT-licensed; it is
-# invoked as a subprocess, never linked into TexCraft.
+# invoked as a subprocess, never linked into WarraqCraft.
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts/fetch-tectonic.ps1 [-Version 0.17.0]
 param(
@@ -41,4 +41,4 @@ if (-not (Test-Path $target)) {
 }
 & $target --version
 Write-Host "tectonic -> $target"
-Write-Host "next: TexCraft picks it up automatically (detect_engines checks bin/ first)."
+Write-Host "next: WarraqCraft picks it up automatically (detect_engines checks bin/ first)."

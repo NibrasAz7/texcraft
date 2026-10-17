@@ -1,6 +1,6 @@
 //! Template gallery: shipped `<id>.tex` + `<id>.meta.toml` pairs.
 //!
-//! Discovery mirrors `find_tectonic()`: the `TEXCRAFT_TEMPLATES` env
+//! Discovery mirrors `find_tectonic()`: the `WARRAQCRAFT_TEMPLATES` env
 //! override first (tests, packaging), then `templates/` next to the
 //! executable, then the nearest ancestor directory containing
 //! `templates/` — which covers dev checkouts where the binary lives
@@ -37,7 +37,7 @@ pub(crate) fn valid_id(id: &str) -> bool {
 /// The templates directory, most-trusted first. `None` when the
 /// install ships none.
 fn templates_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("TEXCRAFT_TEMPLATES").map(PathBuf::from).filter(|p| p.is_dir()) {
+    if let Some(dir) = std::env::var_os("WARRAQCRAFT_TEMPLATES").map(PathBuf::from).filter(|p| p.is_dir()) {
         return Some(dir);
     }
     let exe = std::env::current_exe().ok()?;
@@ -201,7 +201,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // Serialise tests that flip TEXCRAFT_TEMPLATES — env is process-wide.
+    // Serialise tests that flip WARRAQCRAFT_TEMPLATES — env is process-wide.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     static NEXT_DIR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -209,7 +209,7 @@ mod tests {
     impl TempDir {
         fn new(tag: &str) -> Self {
             let n = NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("texcraft-templates-test-{}-{tag}-{n}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("warraqcraft-templates-test-{}-{tag}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -230,7 +230,7 @@ mod tests {
         std::fs::write(dir.0.join("plain.tex"), "\\documentclass{report}\n").unwrap(); // no meta
         std::fs::write(dir.0.join("bad.tex"), "x\n").unwrap();
         std::fs::write(dir.0.join("bad.meta.toml"), "name = not-a-string\n").unwrap(); // malformed meta skipped
-        std::env::set_var("TEXCRAFT_TEMPLATES", &dir.0);
+        std::env::set_var("WARRAQCRAFT_TEMPLATES", &dir.0);
 
         let mut s = crate::Session::new();
         let out = s.execute("template.list", &json!({})).unwrap();
@@ -257,7 +257,7 @@ mod tests {
         assert!(s.execute("template.new", &json!({"id": "alpha", "path": dest})).is_err());
         s.execute("template.new", &json!({"id": "alpha", "path": dest, "force": true})).unwrap();
 
-        std::env::remove_var("TEXCRAFT_TEMPLATES");
+        std::env::remove_var("WARRAQCRAFT_TEMPLATES");
     }
 
     #[test]
@@ -265,7 +265,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = TempDir::new("ids");
         std::fs::write(dir.0.join("ok.tex"), "x\n").unwrap();
-        std::env::set_var("TEXCRAFT_TEMPLATES", &dir.0);
+        std::env::set_var("WARRAQCRAFT_TEMPLATES", &dir.0);
         let mut s = crate::Session::new();
         for bad in ["../evil", "a/b", "a\\b", "", &"x".repeat(65)] {
             assert!(matches!(s.execute("template.read", &json!({"id": bad})), Err(EngineError::BadParam("id"))), "id {bad:?}");
@@ -276,6 +276,6 @@ mod tests {
         }
         assert!(matches!(s.execute("template.read", &json!({"id": "ghost"})), Err(EngineError::Io(_))));
         assert!(matches!(s.execute("template.new", &json!({"id": "ok"})), Err(EngineError::BadParam("path"))));
-        std::env::remove_var("TEXCRAFT_TEMPLATES");
+        std::env::remove_var("WARRAQCRAFT_TEMPLATES");
     }
 }

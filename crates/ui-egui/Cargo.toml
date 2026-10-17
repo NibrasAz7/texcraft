@@ -1,6 +1,6 @@
 [package]
-name = "texcraft-ui-egui"
-description = "TexCraft Studio user interface (egui): editor, live structure outline, issues panel."
+name = "warraqcraft-ui-egui"
+description = "WarraqCraft Studio user interface (egui): editor, live structure outline, issues panel."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,13 +9,13 @@ license.workspace = true
 workspace = true
 
 [lib]
-name = "texcraft_ui_egui"
+name = "warraqcraft_ui_egui"
 path = "src/lib.rs"
 
 [dependencies]
 texparse = { path = "../texparse" }
 texpkg = { path = "../texpkg" }
-texcraft-engine = { path = "../engine" }
+warraqcraft-engine = { path = "../engine" }
 craft-atomic.workspace = true
 craft-quit.workspace = true
 craft-settings.workspace = true

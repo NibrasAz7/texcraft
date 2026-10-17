@@ -86,7 +86,7 @@ Macros: user tags, JS/QtScript macros with `browseMacrosOnRepository`,
 import/export. Command-line args incl. `--insert-cite` (Zotero push),
 `--start-always`, `--auto-activate-hidden` etc. Update checker.
 
-## Merge plan — mapped to TexCraft milestones
+## Merge plan — mapped to WarraqCraft milestones
 
 Prioritized by value ÷ effort for the current stack. Existing coverage
 is omitted (editor/tree/preview/SyncTeX/log navigation already exist).

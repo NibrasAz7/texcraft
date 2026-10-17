@@ -1,6 +1,6 @@
 [package]
 name = "texparse"
-description = "TexCraft parsing core: .tex lexer and document-structure scan, .bib parser, SyncTeX data."
+description = "WarraqCraft parsing core: .tex lexer and document-structure scan, .bib parser, SyncTeX data."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

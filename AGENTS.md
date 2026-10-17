@@ -1,6 +1,6 @@
-# TexCraft — instructions for agents
+# WarraqCraft — instructions for agents
 
-TexCraft is a clean-room, open-source, Rust-native LaTeX authoring and
+WarraqCraft is a clean-room, open-source, Rust-native LaTeX authoring and
 typesetting environment — Overleaf-class UX on the desktop, local-first.
 It is the LaTeX-class member of the ArtCraft ecosystem and will run natively
 on macOS, Windows, Linux and BSD, and on the web via WASM. Siblings with the
@@ -28,7 +28,7 @@ The product description and open decisions live in [`README.md`](README.md).
 - Never copy assets, icons, screenshots or wording from TeXstudio, Overleaf,
   TeXmaker or any other TeX editor beyond feature names.
 - `\write18`-style shell escape is **always disabled**, regardless of input.
-- Name rule: TexCraft is "LaTeX-compatible", never claims to be TeX.
+- Name rule: WarraqCraft is "LaTeX-compatible", never claims to be TeX.
 
 ## Never crash
 
@@ -60,7 +60,7 @@ LaTeX input is famously adversarial. **This outranks feature work.**
 | L3 | `texpkg` | package/class registry + loader (arabdoc built in) |
 | L5 | `engine` | command registry + Session guard |
 | L6 | `mcp`, `ui-egui` | JSON-RPC server; egui studio UI |
-| L7 | `apps/*` | `texcraft-cli`, `texcraft` studio + control server |
+| L7 | `apps/*` | `warraqcraft-cli`, `warraqcraft` studio + control server |
 
 - **Everything is a command** once `engine` lands: `document.compile`,
   `cite.insert`, `figure.insert`, `project.snapshot`, `history.diff` —

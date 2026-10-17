@@ -18,4 +18,4 @@ foreach ($name in @("en_US.aff", "en_US.dic")) {
     $bytes = (Get-Item $out).Length
     Write-Host "$name -> $out ($bytes bytes)"
 }
-Write-Host "next: TexCraft picks them up automatically (spellcheck looks for dicts/ next to the exe and in ancestor dirs)."
+Write-Host "next: WarraqCraft picks them up automatically (spellcheck looks for dicts/ next to the exe and in ancestor dirs)."

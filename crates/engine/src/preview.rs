@@ -1,6 +1,6 @@
 //! `math.preview`: TeXstudio-style "preview selected math". A math
 //! fragment is wrapped in a minimal `article` preamble, written to a
-//! scratch file under `.texcraft/preview/` next to the document, and
+//! scratch file under `.warraqcraft/preview/` next to the document, and
 //! compiled through the same [`compile_file`] pipeline as
 //! `document.compile` — engine detection, tectonic preference,
 //! nonstop/halt-on-error flags, log parsing; shell escape stays off.
@@ -19,7 +19,7 @@ const MAX_LATEX: usize = 64 * 1024;
 /// `log` in the response: at most the last this-many characters of
 /// the report's log tail.
 const MAX_LOG_CHARS: usize = 1200;
-/// Preview scratch dir under the document's `.texcraft/` build dir.
+/// Preview scratch dir under the document's `.warraqcraft/` build dir.
 const PREVIEW_DIR: &str = "preview";
 
 /// Minimal `article` preamble around the fragment. Fragments that
@@ -66,8 +66,8 @@ pub fn run(session: &Session, params: &Value) -> Result<Value, EngineError> {
     let scratch = dir.join("m.tex");
     craft_atomic::atomic_write(&scratch, src.as_bytes())?;
 
-    // `compile_file` builds into `<scratch-dir>/.texcraft/`, i.e.
-    // `.texcraft/preview/.texcraft/m.pdf` — still under the build dir.
+    // `compile_file` builds into `<scratch-dir>/.warraqcraft/`, i.e.
+    // `.warraqcraft/preview/.warraqcraft/m.pdf` — still under the build dir.
     let report = compile_file(&scratch, Some(&src))?;
     Ok(json!({
         "pdf": report.pdf.as_ref().map(|p| p.display().to_string()),
@@ -87,7 +87,7 @@ mod tests {
     impl TempDir {
         fn new(tag: &str) -> Self {
             let n = NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("texcraft-preview-test-{}-{tag}-{n}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("warraqcraft-preview-test-{}-{tag}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)

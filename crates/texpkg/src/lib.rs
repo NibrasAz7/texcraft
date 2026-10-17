@@ -1,11 +1,11 @@
-//! TexCraft package catalog (L3).
+//! WarraqCraft package catalog (L3).
 //!
 //! A statically compiled catalog of common LaTeX commands and
-//! environments — TexCraft's own completion data, authored from the
+//! environments — WarraqCraft's own completion data, authored from the
 //! LaTeX2e documentation and CTAN package manuals (never copied from
 //! other editors' `.cwl` files). It powers command, environment and
 //! package completion in the editor UI, and doubles as the seed of the
-//! package/class registry that will load TexCraft's bundled packages
+//! package/class registry that will load WarraqCraft's bundled packages
 //! (like `arabdoc`) later.
 //!
 //! The data is pure `&'static` tables — zero dependencies, zero

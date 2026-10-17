@@ -1,7 +1,7 @@
-//! TexCraft MCP server (L6): Model Context Protocol over the engine
+//! WarraqCraft MCP server (L6): Model Context Protocol over the engine
 //! [`Session`].
 //!
-//! **Opt-in only.** Nothing in TexCraft starts this server on its own: it
+//! **Opt-in only.** Nothing in WarraqCraft starts this server on its own: it
 //! runs when a user (or an agent the user configured) launches it, and it
 //! never opens a network port — the transport is newline-delimited JSON-RPC
 //! 2.0 (NDJSON) over stdin/stdout, one message per line.
@@ -12,8 +12,8 @@
 //! maps one-to-one onto a [`Session::execute`] command; engine failures are
 //! reported inside the result (`isError: true`) so the agent can read them,
 //! while protocol failures use JSON-RPC error codes. The open document is
-//! also exposed read-only as `texcraft://doc/source`,
-//! `texcraft://doc/structure` and `texcraft://doc/stats`.
+//! also exposed read-only as `warraqcraft://doc/source`,
+//! `warraqcraft://doc/structure` and `warraqcraft://doc/stats`.
 //!
 //! Input is untrusted: lines are capped at 4 MiB (longer ones get a parse
 //! error and are drained), malformed JSON is a `-32700` reply, and no code
@@ -24,7 +24,7 @@
 use std::io::{self, BufRead, Read, Write};
 
 use serde_json::{json, Value};
-use texcraft_engine::Session;
+use warraqcraft_engine::Session;
 
 /// Protocol revisions we speak, newest first.
 pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -41,16 +41,16 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
-const SOURCE_URI: &str = "texcraft://doc/source";
-const STRUCTURE_URI: &str = "texcraft://doc/structure";
-const STATS_URI: &str = "texcraft://doc/stats";
+const SOURCE_URI: &str = "warraqcraft://doc/source";
+const STRUCTURE_URI: &str = "warraqcraft://doc/structure";
+const STATS_URI: &str = "warraqcraft://doc/stats";
 
-const INSTRUCTIONS: &str = "TexCraft edits LaTeX documents. Open a .tex file with document_open or set the buffer directly \
+const INSTRUCTIONS: &str = "WarraqCraft edits LaTeX documents. Open a .tex file with document_open or set the buffer directly \
 with source_set, then run the tools: source_get, structure_get and magic_get inspect the buffer, document_compile typesets \
 it with tectonic or a system TeX engine, math_preview renders a math fragment, text_stats reports document statistics, \
 template_* create documents from the shipped gallery, user_tool_* run configured external tools, and \
 project_snapshot/snapshot_* keep local file history. The open document is also readable as resources \
-texcraft://doc/source (text/plain), texcraft://doc/structure and texcraft://doc/stats (application/json) — read-only \
+warraqcraft://doc/source (text/plain), warraqcraft://doc/structure and warraqcraft://doc/stats (application/json) — read-only \
 snapshots of the live buffer.";
 
 /// MCP tool name → engine command id. The two tables stay in sync — a test
@@ -186,7 +186,7 @@ impl McpServer {
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": {}, "resources": {} },
-                    "serverInfo": { "name": "texcraft", "title": "TexCraft", "version": env!("CARGO_PKG_VERSION") },
+                    "serverInfo": { "name": "warraqcraft", "title": "WarraqCraft", "version": env!("CARGO_PKG_VERSION") },
                     "instructions": INSTRUCTIONS,
                 }))
             }
@@ -321,7 +321,7 @@ fn tool_list() -> Vec<Value> {
         ),
         tool(
             "document_compile",
-            "Save if dirty, then compile with tectonic or a system TeX engine into .texcraft/ next to the document.",
+            "Save if dirty, then compile with tectonic or a system TeX engine into .warraqcraft/ next to the document.",
             json!({}),
             &[],
             false,
@@ -400,7 +400,7 @@ fn tool_list() -> Vec<Value> {
         ),
         tool(
             "math_preview",
-            "Compile a LaTeX math fragment to a preview PDF under .texcraft/preview/.",
+            "Compile a LaTeX math fragment to a preview PDF under .warraqcraft/preview/.",
             json!({ "latex": s("The LaTeX math fragment to render.") }),
             &["latex"],
             true,
@@ -416,7 +416,7 @@ fn tool_list() -> Vec<Value> {
         ),
         tool(
             "project_snapshot",
-            "Snapshot the project's source files under .texcraft/snapshots/ (writes to disk).",
+            "Snapshot the project's source files under .warraqcraft/snapshots/ (writes to disk).",
             json!({ "label": s("Optional snapshot label.") }),
             &[],
             false,
@@ -464,12 +464,12 @@ mod tests {
         // Supported version is echoed back.
         let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05"}})).unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2024-11-05");
-        assert_eq!(r["result"]["serverInfo"]["name"], "texcraft");
-        assert_eq!(r["result"]["serverInfo"]["title"], "TexCraft");
+        assert_eq!(r["result"]["serverInfo"]["name"], "warraqcraft");
+        assert_eq!(r["result"]["serverInfo"]["title"], "WarraqCraft");
         assert!(r["result"]["capabilities"]["tools"].is_object());
         assert!(r["result"]["capabilities"]["resources"].is_object());
         let instructions = r["result"]["instructions"].as_str().unwrap();
-        assert!(instructions.contains("document_open") && instructions.contains("texcraft://doc/source"));
+        assert!(instructions.contains("document_open") && instructions.contains("warraqcraft://doc/source"));
         // Unknown/absent version → newest supported.
         let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}})).unwrap();
         assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
@@ -609,7 +609,7 @@ mod tests {
         let v: Value = serde_json::from_str(r["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
         assert!(v["words"].as_u64().is_some());
         // Bad uri → -32602.
-        let r = read(&mut s, 8, "texcraft://doc/nope");
+        let r = read(&mut s, 8, "warraqcraft://doc/nope");
         assert_eq!(r["error"]["code"], -32602);
         // Missing uri → -32602.
         let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": {}})).unwrap();

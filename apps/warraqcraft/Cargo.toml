@@ -1,6 +1,6 @@
 [package]
-name = "texcraft"
-description = "TexCraft Studio: LaTeX editor with live structure outline (egui)."
+name = "warraqcraft"
+description = "WarraqCraft Studio: LaTeX editor with live structure outline (egui)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,10 @@ license.workspace = true
 workspace = true
 
 [[bin]]
-name = "texcraft"
+name = "warraqcraft"
 path = "src/main.rs"
 
 [dependencies]
-texcraft-ui-egui = { path = "../../crates/ui-egui" }
+warraqcraft-ui-egui = { path = "../../crates/ui-egui" }
 egui = "0.36"
 eframe = "0.36"

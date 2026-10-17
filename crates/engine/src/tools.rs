@@ -312,7 +312,7 @@ mod tests {
         assert!(matches!(s.execute("user_tool.run", &json!({"argv": ["   "]})), Err(EngineError::BadParam("argv"))));
         assert!(matches!(s.execute("user_tool.run", &json!({"argv": [42]})), Err(EngineError::BadParam("argv"))));
         assert!(matches!(s.execute("user_tool.run", &json!({"name": "ghost"})), Err(EngineError::Tool(_))));
-        assert!(s.execute("user_tool.run", &json!({"argv": ["texcraft-no-such-exe-zzz"]})).is_err());
+        assert!(s.execute("user_tool.run", &json!({"argv": ["warraqcraft-no-such-exe-zzz"]})).is_err());
         assert!(matches!(s.execute("user_tool.set", &json!({"tools": [{"argv": []}]})), Err(EngineError::BadParam("argv"))));
         assert!(matches!(s.execute("user_tool.set", &json!({})), Err(EngineError::BadParam("tools"))));
         // The session stays usable after tool errors.

@@ -3528,64 +3528,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "texcraft"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "texcraft-ui-egui",
-]
-
-[[package]]
-name = "texcraft-cli"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "texcraft-engine",
- "texcraft-mcp",
- "texparse",
-]
-
-[[package]]
-name = "texcraft-engine"
-version = "0.1.0"
-dependencies = [
- "craft-atomic",
- "serde_json",
- "texparse",
-]
-
-[[package]]
-name = "texcraft-mcp"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "texcraft-engine",
-]
-
-[[package]]
-name = "texcraft-ui-egui"
-version = "0.1.0"
-dependencies = [
- "craft-ai",
- "craft-atomic",
- "craft-print",
- "craft-quit",
- "craft-settings",
- "eframe",
- "egui",
- "hayro",
- "image",
- "rfd",
- "serde",
- "serde_json",
- "spellbook",
- "texcraft-engine",
- "texparse",
- "texpkg",
-]
-
-[[package]]
 name = "texparse"
 version = "0.1.0"
 
@@ -3991,6 +3933,64 @@ checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
 dependencies = [
  "same-file",
  "winapi-util",
+]
+
+[[package]]
+name = "warraqcraft"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "warraqcraft-ui-egui",
+]
+
+[[package]]
+name = "warraqcraft-cli"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "texparse",
+ "warraqcraft-engine",
+ "warraqcraft-mcp",
+]
+
+[[package]]
+name = "warraqcraft-engine"
+version = "0.1.0"
+dependencies = [
+ "craft-atomic",
+ "serde_json",
+ "texparse",
+]
+
+[[package]]
+name = "warraqcraft-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "warraqcraft-engine",
+]
+
+[[package]]
+name = "warraqcraft-ui-egui"
+version = "0.1.0"
+dependencies = [
+ "craft-ai",
+ "craft-atomic",
+ "craft-print",
+ "craft-quit",
+ "craft-settings",
+ "eframe",
+ "egui",
+ "hayro",
+ "image",
+ "rfd",
+ "serde",
+ "serde_json",
+ "spellbook",
+ "texparse",
+ "texpkg",
+ "warraqcraft-engine",
 ]
 
 [[package]]

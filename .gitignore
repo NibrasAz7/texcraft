@@ -1,5 +1,5 @@
 target/
-.texcraft/
+.warraqcraft/
 
 # TeX build artifacts from in-place example compiles
 examples/*.aux
@@ -10,7 +10,7 @@ examples/*.fls
 examples/*.log
 examples/*.pdf
 examples/*.synctex.gz
-texcraft-shot.png
+warraqcraft-shot.png
 
 # Bundled Tectonic engine binary (fetch via scripts/fetch-tectonic.ps1)
 bin/

@@ -1,16 +1,16 @@
-//! TexCraft Studio — `texcraft [file.tex]`.
+//! WarraqCraft Studio — `warraqcraft [file.tex]`.
 //!
 //! M0 surface: editor + live outline. `--control FILE` (native only)
 //! starts the opt-in TCP control channel: the app binds a random
 //! loopback port and writes `{"port","token","pid"}` to FILE so an
-//! agent can drive the engine session (`texcraft_ui_egui::control`).
+//! agent can drive the engine session (`warraqcraft_ui_egui::control`).
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
-use texcraft_ui_egui::TexApp;
+use warraqcraft_ui_egui::WarraqApp;
 
-const USAGE: &str = "TexCraft Studio\n\nusage: texcraft [--control FILE] [file.tex]\n";
+const USAGE: &str = "WarraqCraft Studio\n\nusage: warraqcraft [--control FILE] [file.tex]\n";
 
 fn main() -> eframe::Result<()> {
     let mut file: Option<std::path::PathBuf> = None;
@@ -36,7 +36,7 @@ fn main() -> eframe::Result<()> {
     // Start the channel before the GUI: `--control` was asked for, so
     // carrying on without it would leave a script driving nothing.
     let control = match &control_file {
-        Some(path) => match texcraft_ui_egui::control::Control::start(path) {
+        Some(path) => match warraqcraft_ui_egui::control::Control::start(path) {
             // Never the token: it stays in the owner-only file.
             Ok(c) => {
                 eprintln!("control channel on 127.0.0.1:{} (connection details in {})", c.port(), path.display());
@@ -51,10 +51,10 @@ fn main() -> eframe::Result<()> {
     };
     let native = eframe::NativeOptions { viewport: egui::ViewportBuilder::default().with_inner_size([1400.0, 900.0]), ..Default::default() };
     eframe::run_native(
-        "TexCraft",
+        "WarraqCraft",
         native,
         Box::new(move |cc| {
-            let mut app = TexApp::new(cc, file.clone());
+            let mut app = WarraqApp::new(cc, file.clone());
             if let Some(c) = control {
                 app.set_control(&cc.egui_ctx, c);
             }

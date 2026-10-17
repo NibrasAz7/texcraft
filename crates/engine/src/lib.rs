@@ -1,10 +1,10 @@
-//! TexCraft engine layer (L5): `Session` + command surface.
+//! WarraqCraft engine layer (L5): `Session` + command surface.
 //!
 //! M0 scope: `Session` holds the open document (path, source, dirty flag)
 //! and `execute()` dispatches the first command set — `document.open`,
 //! `document.save`, `document.compile`, `source.set`, `source.get`,
 //! `structure.get`. `document.compile` runs a TeX engine into a
-//! `.texcraft/` build directory next to the document, parses the log,
+//! `.warraqcraft/` build directory next to the document, parses the log,
 //! and reports the PDF path. Engine preference: a bundled or PATH
 //! `tectonic` (Track B-lite, zero TeX install) first, then system
 //! xelatex/lualatex/pdflatex on PATH (Track C). Shell escape is never
@@ -13,7 +13,7 @@
 //! named external tools (fixed argv, no shell — see [`tools`]).
 //! `template.*` commands serve the shipped template gallery (see
 //! [`templates`]); `project.snapshot`/`snapshot.*` keep local file
-//! history under `.texcraft/snapshots/` (see [`history`]);
+//! history under `.warraqcraft/snapshots/` (see [`history`]);
 //! `math.preview` compiles a selected math fragment for inline
 //! preview (see [`preview`]) and `text.stats` reports document
 //! statistics (see [`stats`]).
@@ -37,7 +37,21 @@ pub use tools::UserTool;
 
 /// Hidden build directory next to the document (`.aux`/`.log`/`.pdf`,
 /// `snapshots/`).
-pub(crate) const BUILD_DIR: &str = ".texcraft";
+pub(crate) const BUILD_DIR: &str = ".warraqcraft";
+
+/// Pre-rename (TexCraft-era) projects kept this state under `.texcraft/`.
+/// Adopt it once, if the new dir doesn't exist yet.
+const LEGACY_BUILD_DIR: &str = ".texcraft";
+
+/// Rename `root/.texcraft` → `root/.warraqcraft` when the former exists
+/// and the latter doesn't. Best-effort: a failed rename just means the
+/// old state stays put.
+pub(crate) fn migrate_legacy_dir(root: &Path) {
+    let new = root.join(BUILD_DIR);
+    if !new.exists() {
+        let _ = std::fs::rename(root.join(LEGACY_BUILD_DIR), new);
+    }
+}
 
 /// Packages that require a Unicode TeX engine (XeTeX/LuaTeX).
 const UNICODE_PACKAGES: [&str; 4] = ["fontspec", "unicode-math", "polyglossia", "bidi"];
@@ -120,7 +134,7 @@ impl CompileReport {
     }
 }
 
-/// An open TexCraft document session.
+/// An open WarraqCraft document session.
 #[derive(Default)]
 pub struct Session {
     path: Option<PathBuf>,
@@ -282,7 +296,7 @@ impl Session {
                 }))
             }
             // Inline math preview: fragment → scratch `.tex` → PDF
-            // under `.texcraft/preview/` for the UI to rasterize.
+            // under `.warraqcraft/preview/` for the UI to rasterize.
             "math.preview" => preview::run(self, params),
             // Document statistics (words, chars, math spans, …).
             "text.stats" => stats::run(self, params),
@@ -330,12 +344,12 @@ fn on_path(name: &str) -> bool {
 }
 
 /// Locate a usable `tectonic` binary, most-trusted first: the
-/// `TEXCRAFT_TECTONIC` env override, then bundled next to the app
+/// `WARRAQCRAFT_TECTONIC` env override, then bundled next to the app
 /// (installed layout), then `bin/` under the cwd or the workspace
 /// root (dev layout), finally PATH.
 fn find_tectonic() -> Option<PathBuf> {
     let exe_name = if cfg!(windows) { "tectonic.exe" } else { "tectonic" };
-    if let Some(p) = std::env::var_os("TEXCRAFT_TECTONIC").map(PathBuf::from).filter(|p| p.is_file()) {
+    if let Some(p) = std::env::var_os("WARRAQCRAFT_TECTONIC").map(PathBuf::from).filter(|p| p.is_file()) {
         return Some(p);
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -343,7 +357,7 @@ fn find_tectonic() -> Option<PathBuf> {
         if let Some(dir) = exe_path.parent() {
             candidates.push(dir.join(exe_name));
             candidates.push(dir.join("bin").join(exe_name));
-            // dev layout: <ws>/target/debug/texcraft.exe → <ws>/bin/
+            // dev layout: <ws>/target/debug/warraqcraft.exe → <ws>/bin/
             if let Some(ws) = dir.ancestors().nth(2) {
                 candidates.push(ws.join("bin").join(exe_name));
             }
@@ -395,7 +409,7 @@ fn find_engine(unicode: bool) -> Option<Engine> {
     candidates.iter().find(|c| on_path(c)).map(|c| Engine { name: c.to_string(), program: PathBuf::from(c) })
 }
 
-/// Compile `path` with a system TeX engine into `<dir>/.texcraft/`.
+/// Compile `path` with a system TeX engine into `<dir>/.warraqcraft/`.
 /// `src` (the possibly-unsaved buffer) is only used for engine selection;
 /// the file on disk is what gets compiled — save first.
 pub fn compile_file(path: &Path, src: Option<&str>) -> Result<CompileReport, EngineError> {
@@ -447,6 +461,7 @@ pub fn compile_file_with(path: &Path, src: Option<&str>, engine_override: Option
         None => magic.engine_hint().and_then(resolve_engine).or_else(|| find_engine(unicode)).ok_or(EngineError::NoTexEngine)?,
     };
 
+    migrate_legacy_dir(parent);
     let outdir = parent.join(BUILD_DIR);
     std::fs::create_dir_all(&outdir)?;
 

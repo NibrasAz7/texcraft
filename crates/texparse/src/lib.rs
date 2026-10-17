@@ -1,4 +1,4 @@
-//! TexCraft parsing core (L0).
+//! WarraqCraft parsing core (L0).
 //!
 //! Three independent, allocation-capped, never-panicking readers for
 //! untrusted input:

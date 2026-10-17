@@ -29,7 +29,7 @@
 //!   queue grow without bound.
 //!
 //! Requests reach the UI thread through a bounded channel; [`Control::poll`]
-//! drains it in `TexApp::logic` with `try_recv` only, so accepting work
+//! drains it in `WarraqApp::logic` with `try_recv` only, so accepting work
 //! never blocks the frame. **Known v1 limit:** the command itself runs
 //! on the UI thread — `document.compile` freezes the window while TeX
 //! runs (the GUI's own compile uses a worker; unifying that is future
@@ -43,7 +43,7 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, OnceLock};
 
 use serde_json::{json, Value};
-use texcraft_engine::Session;
+use warraqcraft_engine::Session;
 
 /// Longest request line, 4 MiB — a generous ceiling for `source.set` on
 /// a large document; longer lines are refused, not buffered.
@@ -114,7 +114,7 @@ impl Control {
         let ctx = Arc::new(OnceLock::new());
         {
             let (tx, token, stop, ctx) = (tx.clone(), token.clone(), stop.clone(), ctx.clone());
-            std::thread::Builder::new().name("texcraft-control".into()).spawn(move || accept_loop(listener, tx, token, stop, ctx))?;
+            std::thread::Builder::new().name("warraqcraft-control".into()).spawn(move || accept_loop(listener, tx, token, stop, ctx))?;
         }
         Ok(Control { rx, port, token, ctx, file: None, stop })
     }
@@ -132,7 +132,7 @@ impl Control {
     }
 
     /// Drain pending requests, executing each on `session` and replying
-    /// through its oneshot. Called from `TexApp::logic` every frame;
+    /// through its oneshot. Called from `WarraqApp::logic` every frame;
     /// `try_recv` only — it never waits.
     pub fn poll(&self, session: &mut Session) {
         while let Ok(req) = self.rx.try_recv() {
@@ -170,13 +170,13 @@ fn accept_loop(listener: TcpListener, tx: SyncSender<CtrlRequest>, token: Arc<st
         match stream {
             Ok(s) => {
                 let (tx, token, ctx) = (tx.clone(), token.clone(), ctx.clone());
-                if let Err(e) = std::thread::Builder::new().name("texcraft-control-conn".into()).spawn(move || conn(s, tx, token, ctx)) {
-                    eprintln!("texcraft control: cannot spawn a connection thread: {e}");
+                if let Err(e) = std::thread::Builder::new().name("warraqcraft-control-conn".into()).spawn(move || conn(s, tx, token, ctx)) {
+                    eprintln!("warraqcraft control: cannot spawn a connection thread: {e}");
                 }
             }
             // A transient accept error (e.g. fd pressure) shouldn't kill
             // the channel — log and keep accepting.
-            Err(e) => eprintln!("texcraft control: accept failed: {e}"),
+            Err(e) => eprintln!("warraqcraft control: accept failed: {e}"),
         }
     }
 }
@@ -560,7 +560,7 @@ mod tests {
     /// it on drop.
     #[test]
     fn the_control_file_is_published_then_removed() {
-        let dir = std::env::temp_dir().join(format!("texcraft-control-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("warraqcraft-control-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("ctl.json");
         let port;
@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn the_control_file_replaces_a_symlink_instead_of_writing_through_it() {
         use std::os::unix::fs::symlink;
-        let dir = std::env::temp_dir().join(format!("texcraft-control-link-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("warraqcraft-control-link-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("target.txt");
         std::fs::write(&target, b"original").unwrap();
