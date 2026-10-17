@@ -13,7 +13,7 @@ widget) are tracked there — nothing in M0 depends on them.
 | M0 | Repo scaffold (workspace, lints, xtask, AGENTS) + `texparse` (.tex lexer, structure scan, .bib parser) + `warraqcraft-cli parse/bib/check` | done |
 | M1 | Engine decision landed; `texpkg` curated package set; minimal compile pipeline (`document.compile`) | in progress — system-TeX + bundled tectonic (B-lite) done; `texpkg` open |
 | M2 | `engine` command registry + Session; CLI `--cmd` surface | in progress — Session + execute() landed; `--cmd`/control next |
-| M3 | `ui-egui` studio: project tree, editor, PDF preview, SyncTeX nav | in progress — IDE shell, editor, PDF preview and SyncTeX click-through done; project-wide awareness next |
+| M3 | `ui-egui` studio: project tree, editor, PDF preview, SyncTeX nav | in progress — IDE shell, editor, PDF preview, SyncTeX click-through and project-wide outline/refs done |
 | M4 | History (snapshots/diff/restore), reference-manager integration (Zotero/CSL), arabdoc + template gallery | not started |
 
 ## Progress log
@@ -125,3 +125,12 @@ widget) are tracked there — nothing in M0 depends on them.
     follow), per-request-token NDJSON requests drained through
     logic(), oneshot replies, 64 in-flight cap. Client:
     `warraqcraft-cli ui --control FILE <cmd> [--params]`.
+- M3.4 — project-wide awareness: engine `project.structure` walks the
+  `% !TeX root`-aware `\input` graph and merges each file's headings,
+  labels, cite keys and unresolved deps (open file parsed from the live
+  buffer; `.sty`/`.cls` distro deps filtered out). UI: FILE OUTLINE is
+  now the project outline — per-file headers, a missing-files warning,
+  and cross-file click→open+jump; `\ref{`/`\eqref{`/… completion offers
+  project labels tagged with their defining file (completion items are
+  now owned `CompletionItem`s so label keys can carry dynamic meta).
+  Exposed as `project_structure` on CLI/control/MCP.

@@ -20,7 +20,7 @@ mod fold;
 mod fonts;
 mod highlight;
 mod icons;
-mod lang;
+pub mod lang;
 mod mathprev;
 mod mirrors;
 mod spellcheck;
@@ -45,6 +45,9 @@ const MAX_PREVIEW_PAGES: usize = 128;
 const GUTTER_W: f32 = 56.0;
 /// How often the project tree is rescanned, seconds.
 const TREE_SCAN_SECS: f64 = 1.5;
+/// Commands whose `{…}` arg completes project-wide `\label`s (M3) —
+/// mirrors `texparse`'s REFS scan set.
+const REF_CMDS: &[&str] = &["ref", "eqref", "pageref", "autoref", "cref", "Cref", "vref"];
 
 /// A rasterized page plus its PDF size in points (top-left origin) —
 /// SyncTeX speaks points, so we need the pt dimensions to map clicks.
@@ -253,8 +256,37 @@ struct Completion {
     /// the `\word`/`{word` span is `start..end`.
     end: usize,
     env: bool,
-    items: Vec<&'static texpkg::CommandSpec>,
+    items: Vec<CompletionItem>,
     sel: usize,
+}
+
+/// One popup row, pre-rendered: `\cmd`/`env` items come from `texpkg`,
+/// `\ref{}` items come from the project's labels. `insert` is the text
+/// that replaces the prefix span; `caret_back` is how many chars before
+/// its end the caret lands (1 for `\name{}` → inside the braces).
+struct CompletionItem {
+    name: String,
+    /// Signature/mono line next to the name (`[opts]{req}`), may be empty.
+    sig: String,
+    /// Muted second line — `package — doc` for catalog items, the
+    /// defining file for labels.
+    meta: String,
+    insert: String,
+    caret_back: usize,
+}
+
+/// One `.tex` file's contribution to the merged project outline.
+struct ProjFile {
+    path: PathBuf,
+    /// Base file name for the row badge (`ch1.tex`).
+    name: String,
+    /// This file is the one in the editor — its headings come live from
+    /// `self.doc`, not this (possibly stale) disk scan.
+    is_current: bool,
+    headings: Vec<texparse::Heading>,
+    /// `\label`s defined here — used to tag `\ref{}` completion items
+    /// with their defining file.
+    labels: Vec<String>,
 }
 
 /// A finished user-tool run (engine `user_tool.run` result).
@@ -291,6 +323,15 @@ pub struct WarraqApp {
     tree_scanned_at: f64,
     expanded: HashSet<PathBuf>,
     main_file: Option<PathBuf>,
+    /// Merged project structure (`project.structure`): every `.tex`
+    /// reachable from the root, in graph order. Drives the outline and
+    /// `\ref{}` completion.
+    proj_files: Vec<ProjFile>,
+    /// Union of `\label`s across the project (plus the live buffer's).
+    proj_labels: Vec<String>,
+    /// Unresolved file deps the scan saw (missing `\input`, graphics, bibs).
+    proj_missing: usize,
+    proj_scanned_at: f64,
     outline_open: bool,
     show_logs: bool,
     cursor_lc: (usize, usize),
@@ -412,6 +453,10 @@ impl WarraqApp {
             tree_scanned_at: f64::NEG_INFINITY,
             expanded: HashSet::new(),
             main_file: None,
+            proj_files: Vec::new(),
+            proj_labels: Vec::new(),
+            proj_missing: 0,
+            proj_scanned_at: f64::NEG_INFINITY,
             outline_open: true,
             show_logs: false,
             cursor_lc: (1, 1),
@@ -574,6 +619,7 @@ impl WarraqApp {
                 self.src_stamp = self.src_stamp.wrapping_add(1);
                 self.rebuild_marks(); // report is gone — clear the dots
                 self.reparse();
+                self.proj_scanned_at = f64::NEG_INFINITY;
                 self.load_tools();
             }
             Err(e) => self.status = format!("cannot open {}: {e}", path.display()),
@@ -735,6 +781,48 @@ impl WarraqApp {
         // The ≤64 chars before the caret — enough for `\begin{prefix`.
         let back_start = src.char_indices().nth(ci.saturating_sub(64)).map(|(b, _)| b).unwrap_or(0);
         let back = src.get(back_start..byte_of_char(src, ci)).unwrap_or("");
+        // `\ref{`-family inside an open arg — complete project labels.
+        // The `}` in a closed arg fails the charset check, so this only
+        // fires while the brace is still open.
+        let label_prefix = REF_CMDS
+            .iter()
+            .filter_map(|c| {
+                let anchor = format!("\\{c}{{");
+                back.rfind(&anchor).map(|p| p + anchor.len())
+            })
+            .max()
+            .and_then(|w_start| {
+                let w = back.get(w_start..)?;
+                (w.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-' | '.' | '/')) && !w.is_empty()).then(|| w.to_string())
+            });
+        if let Some(w) = label_prefix {
+            let label_word = self.s().label_item;
+            let items: Vec<_> = self
+                .proj_labels
+                .iter()
+                .filter(|l| l.starts_with(w.as_str()))
+                .take(8)
+                .map(|l| {
+                    // Meta line: the file that defines the label.
+                    let file = self.proj_files.iter().find(|f| f.labels.iter().any(|x| x == l)).map(|f| f.name.clone()).unwrap_or_default();
+                    CompletionItem {
+                        name: l.clone(),
+                        sig: String::new(),
+                        meta: format!("{label_word} — {file}"),
+                        insert: format!("{{{l}}}"),
+                        caret_back: 0,
+                    }
+                })
+                .collect();
+            if items.is_empty() {
+                self.complete = None;
+            } else {
+                let start = ci - w.len() - 1; // the '{'
+                let sel = self.complete.as_ref().map(|c| c.sel.min(items.len() - 1)).unwrap_or(0);
+                self.complete = Some(Completion { start, end: ci, env: true, items, sel });
+            }
+            return;
+        }
         // `\begin{` and `\end{` have different lengths — track which hit.
         let env_prefix =
             back.rfind("\\begin{").map(|p| p + "\\begin{".len()).or_else(|| back.rfind("\\end{").map(|p| p + "\\end{".len())).and_then(|w_start| {
@@ -742,7 +830,7 @@ impl WarraqApp {
                 (w.chars().all(|c| c.is_ascii_alphabetic() || c == '*') && !w.is_empty()).then(|| w.to_string())
             });
         if let Some(w) = env_prefix {
-            let items: Vec<_> = texpkg::environments().filter(|c| c.name.starts_with(w.as_str())).take(8).collect();
+            let items: Vec<_> = texpkg::environments().filter(|c| c.name.starts_with(w.as_str())).take(8).map(|c| catalog_item(c, true)).collect();
             if items.is_empty() {
                 self.complete = None;
             } else {
@@ -757,7 +845,7 @@ impl WarraqApp {
             (w.chars().all(|c| c.is_ascii_alphabetic() || c == '@') && w.len() >= 2).then(|| (p, w.to_string()))
         });
         if let Some((_, w)) = cmd_prefix {
-            let items: Vec<_> = texpkg::find_prefix(&w).take(8).collect();
+            let items: Vec<_> = texpkg::find_prefix(&w).take(8).map(|c| catalog_item(c, false)).collect();
             if items.is_empty() {
                 self.complete = None;
             } else {
@@ -780,15 +868,9 @@ impl WarraqApp {
         let mut src = self.session.source().to_string();
         let start_b = byte_of_char(&src, c.start);
         let end_b = byte_of_char(&src, c.end);
-        let insertion = if c.env {
-            format!("{{{}}}", item.name)
-        } else {
-            let braces = if item.args.iter().any(|a| matches!(a.kind, texpkg::ArgKind::Req)) { "{}" } else { "" };
-            format!("\\{}{}", item.name, braces)
-        };
-        src.replace_range(start_b..end_b, &insertion);
+        src.replace_range(start_b..end_b, &item.insert);
         // Caret: inside the braces for arg-commands, otherwise at end.
-        let caret = if !c.env && insertion.ends_with("{}") { start_b + insertion.len() - 1 } else { start_b + insertion.len() };
+        let caret = start_b + item.insert.len() - item.caret_back;
         self.mirrors = None; // completion rewrites the buffer — mirrors die
         self.session.set_source(src);
         self.src_stamp = self.src_stamp.wrapping_add(1);
@@ -809,17 +891,9 @@ impl WarraqApp {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_max_width(420.0);
                 for (i, item) in c.items.iter().enumerate() {
-                    let sig = item
-                        .args
-                        .iter()
-                        .map(|a| match a.kind {
-                            texpkg::ArgKind::Opt | texpkg::ArgKind::Key => format!("[{}]", a.name),
-                            _ => format!("{{{}}}", a.name),
-                        })
-                        .collect::<String>();
-                    let label = if c.env { format!("{}   {}", item.name, sig) } else { format!("\\{}   {}", item.name, sig) };
+                    let label = if c.env { format!("{}   {}", item.name, item.sig) } else { format!("\\{}   {}", item.name, item.sig) };
                     let resp = ui.selectable_label(i == c.sel, egui::RichText::new(label).monospace().size(11.5));
-                    ui.label(egui::RichText::new(format!("{} — {}", item.package, item.doc)).size(9.5).color(theme::pal().muted));
+                    ui.label(egui::RichText::new(item.meta.clone()).size(9.5).color(theme::pal().muted));
                     if resp.clicked() {
                         accept = true;
                     }
@@ -923,6 +997,67 @@ impl WarraqApp {
                 break;
             }
         }
+    }
+
+    /// Merge the reachable `\input` graph into `proj_*` at most every
+    /// TREE_SCAN_SECS via `project.structure` — the outline and `\ref{}`
+    /// completion then see the whole document, not just the open buffer.
+    fn refresh_project(&mut self, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if now - self.proj_scanned_at < TREE_SCAN_SECS {
+            return;
+        }
+        self.proj_scanned_at = now;
+        let Ok(v) = self.session.execute("project.structure", &serde_json::json!({})) else {
+            self.proj_files.clear();
+            self.proj_missing = 0;
+            return;
+        };
+        let open_canon = self.session.path().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+        self.proj_files = v["files"]
+            .as_array()
+            .map(|fs| {
+                fs.iter()
+                    .map(|f| {
+                        let path = PathBuf::from(f["path"].as_str().unwrap_or_default());
+                        ProjFile {
+                            is_current: open_canon.as_deref() == Some(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()).as_path()),
+                            name: f["name"].as_str().unwrap_or_default().to_string(),
+                            headings: f["headings"]
+                                .as_array()
+                                .map(|hs| {
+                                    hs.iter()
+                                        .map(|h| texparse::Heading {
+                                            level: h["level"].as_u64().unwrap_or(0) as u8,
+                                            title: h["title"].as_str().unwrap_or_default().to_string(),
+                                            pos: texparse::Pos { line: h["line"].as_u64().unwrap_or(1) as usize, col: 1, offset: 0 },
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            labels: f["labels"]
+                                .as_array()
+                                .map(|ls| ls.iter().filter_map(|l| l.as_str().map(String::from)).collect())
+                                .unwrap_or_default(),
+                            path,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The open file's labels come live too (the scan may be stale
+        // between the 1.5 s refresh ticks).
+        if let Some(cur) = self.proj_files.iter_mut().find(|f| f.is_current) {
+            cur.labels = self.doc.labels.iter().map(|(l, _)| l.clone()).collect();
+        }
+        self.proj_labels = v["labels"].as_array().map(|ls| ls.iter().filter_map(|l| l.as_str().map(String::from)).collect()).unwrap_or_default();
+        // Live-buffer labels may not be on disk yet — union them in.
+        for (l, _) in &self.doc.labels {
+            if !self.proj_labels.contains(l) {
+                self.proj_labels.push(l.clone());
+            }
+        }
+        self.proj_missing = v["missing"].as_array().map_or(0, |m| m.len());
     }
 
     /// Ctrl+click in the editor → SyncTeX forward: flash the matching box
@@ -1369,30 +1504,75 @@ impl WarraqApp {
                         });
                     });
                     egui::ScrollArea::vertical().id_salt("outline").auto_shrink([false, true]).show(ui, |ui| {
-                        if self.doc.headings.is_empty() {
+                        if self.proj_missing > 0 {
+                            ui.weak(format!("{} {}", self.proj_missing, lang::view(s.missing_files)));
+                        }
+                        // The merged project view: every reachable .tex in
+                        // graph order; the open file contributes its live
+                        // (unsaved) headings. Falls back to the buffer's
+                        // own headings when the project scan hasn't run.
+                        let mut files: Vec<(PathBuf, String, bool, &[texparse::Heading])> = self
+                            .proj_files
+                            .iter()
+                            .map(|pf| {
+                                let hs: &[texparse::Heading] = if pf.is_current { &self.doc.headings } else { &pf.headings };
+                                (pf.path.clone(), pf.name.clone(), pf.is_current, hs)
+                            })
+                            .collect();
+                        if !files.iter().any(|(_, _, cur, _)| *cur) && !self.doc.headings.is_empty() {
+                            let name = self
+                                .session
+                                .path()
+                                .and_then(|p| p.file_name())
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "untitled.tex".into());
+                            files.push((PathBuf::new(), name, true, &self.doc.headings));
+                        }
+                        let with_headings = files.iter().filter(|(_, _, _, hs)| !hs.is_empty()).count();
+                        if with_headings == 0 {
                             ui.weak(lang::view(s.no_headings));
                         }
-                        let mut goto = None;
-                        for h in &self.doc.headings {
-                            let col = outline_color(h.level);
-                            let indent = f32::from(h.level) * 10.0;
-                            let resp = ui
-                                .horizontal(|ui| {
-                                    ui.add_space(indent);
-                                    ui.add(
-                                        egui::Label::new(egui::RichText::new(lang::view(&h.title)).color(col).size(12.0)).sense(egui::Sense::click()),
-                                    );
-                                })
-                                .response;
-                            if resp.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        let show_files = with_headings > 1;
+                        // A jump lands either in this buffer (byte offset)
+                        // or in another file (path + 1-based line).
+                        let mut jump: Option<(Option<PathBuf>, usize)> = None;
+                        for (path, fname, is_current, headings) in &files {
+                            if headings.is_empty() {
+                                continue;
                             }
-                            if resp.clicked() {
-                                goto = Some(h.pos.offset);
+                            if show_files {
+                                ui.label(egui::RichText::new(lang::view(fname)).size(9.5).color(theme::pal().faint).italics());
+                            }
+                            for h in *headings {
+                                let col = outline_color(h.level);
+                                let indent = f32::from(h.level) * 10.0;
+                                let resp = ui
+                                    .horizontal(|ui| {
+                                        ui.add_space(indent);
+                                        ui.add(
+                                            egui::Label::new(egui::RichText::new(lang::view(&h.title)).color(col).size(12.0))
+                                                .sense(egui::Sense::click()),
+                                        );
+                                    })
+                                    .response;
+                                if resp.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if resp.clicked() {
+                                    // In-file jumps carry the byte offset;
+                                    // cross-file jumps carry the line.
+                                    jump = Some(if *is_current { (None, h.pos.offset) } else { (Some(path.clone()), h.pos.line) });
+                                }
                             }
                         }
-                        if let Some(off) = goto {
-                            self.goto = Some(off);
+                        match jump {
+                            Some((None, off)) => self.goto = Some(off),
+                            Some((Some(path), line)) => {
+                                self.open_path(path);
+                                let src = self.session.source().to_string();
+                                self.goto = Some(offset_of_line_col(&src, line, 1));
+                            }
+                            None => {}
                         }
                     });
                 }
@@ -2747,6 +2927,28 @@ fn spread_pages(mode: PageMode, first: usize, n: usize) -> Vec<usize> {
     }
 }
 
+/// A `texpkg` catalog entry → popup item: signature text, `package —
+/// doc` meta line, and the precomputed insertion (`\name`/`{name}`, with
+/// `{}` added for required-arg commands and the caret parked inside).
+fn catalog_item(c: &'static texpkg::CommandSpec, env: bool) -> CompletionItem {
+    let sig = c
+        .args
+        .iter()
+        .map(|a| match a.kind {
+            texpkg::ArgKind::Opt | texpkg::ArgKind::Key => format!("[{}]", a.name),
+            _ => format!("{{{}}}", a.name),
+        })
+        .collect::<String>();
+    let req = !env && c.args.iter().any(|a| matches!(a.kind, texpkg::ArgKind::Req));
+    CompletionItem {
+        name: c.name.to_string(),
+        sig,
+        meta: format!("{} — {}", c.package, c.doc),
+        insert: if env { format!("{{{}}}", c.name) } else { format!("\\{}{}", c.name, if req { "{}" } else { "" }) },
+        caret_back: usize::from(req),
+    }
+}
+
 fn char_index_of_lc(src: &str, line: usize, col: usize) -> usize {
     let mut idx = 0usize;
     for (i, l) in src.split('\n').enumerate() {
@@ -3083,6 +3285,7 @@ impl eframe::App for WarraqApp {
             self.settings.tick(std::time::Instant::now());
         }
         self.refresh_tree(ctx);
+        self.refresh_project(ctx);
         self.mathprev.poll(ctx);
         self.ai.poll();
         // Mirror UI state into prefs each frame — `update` no-ops when

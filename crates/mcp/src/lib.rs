@@ -48,7 +48,8 @@ const STATS_URI: &str = "warraqcraft://doc/stats";
 const INSTRUCTIONS: &str = "WarraqCraft edits LaTeX documents. Open a .tex file with document_open or set the buffer directly \
 with source_set, then run the tools: source_get, structure_get and magic_get inspect the buffer, document_compile typesets \
 it with tectonic or a system TeX engine, math_preview renders a math fragment, text_stats reports document statistics, \
-template_* create documents from the shipped gallery, user_tool_* run configured external tools, and \
+template_* create documents from the shipped gallery, user_tool_* run configured external tools, \
+project_structure merges the outline across the input/include graph, and \
 project_snapshot/snapshot_* keep local file history. The open document is also readable as resources \
 warraqcraft://doc/source (text/plain), warraqcraft://doc/structure and warraqcraft://doc/stats (application/json) — read-only \
 snapshots of the live buffer.";
@@ -71,6 +72,7 @@ const TOOL_COMMANDS: &[(&str, &str)] = &[
     ("template_read", "template.read"),
     ("template_new", "template.new"),
     ("project_graph", "project.graph"),
+    ("project_structure", "project.structure"),
     ("math_preview", "math.preview"),
     ("text_stats", "text.stats"),
     ("project_snapshot", "project.snapshot"),
@@ -399,6 +401,14 @@ fn tool_list() -> Vec<Value> {
             false,
         ),
         tool(
+            "project_structure",
+            "Return the merged outline, labels and cite keys across every .tex file reachable from the open document (or its % !TeX root master).",
+            json!({}),
+            &[],
+            true,
+            false,
+        ),
+        tool(
             "math_preview",
             "Compile a LaTeX math fragment to a preview PDF under .warraqcraft/preview/.",
             json!({ "latex": s("The LaTeX math fragment to render.") }),
@@ -496,7 +506,7 @@ mod tests {
         let mut s = McpServer::new();
         let r = rpc(&mut s, &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 22);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for (name, _) in TOOL_COMMANDS {
             assert!(names.contains(name), "tools/list missing {name}");

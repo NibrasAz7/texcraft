@@ -28,6 +28,7 @@ use texparse::{parse_magic, parse_structure, DocStructure};
 
 pub mod history;
 pub mod preview;
+pub mod project;
 pub mod stats;
 pub mod synctex;
 pub mod templates;
@@ -295,6 +296,9 @@ impl Session {
                     })).collect::<Vec<_>>(),
                 }))
             }
+            // Merged outline + labels across the reachable \input graph —
+            // the open file is parsed from the live buffer (M3).
+            "project.structure" => project::run(self),
             // Inline math preview: fragment → scratch `.tex` → PDF
             // under `.warraqcraft/preview/` for the UI to rasterize.
             "math.preview" => preview::run(self, params),
@@ -748,6 +752,7 @@ mod tests {
             "math.preview",
             "text.stats",
             "project.graph",
+            "project.structure",
             "project.snapshot",
             "snapshot.list",
             "snapshot.read",

@@ -86,6 +86,10 @@ pub struct Strings {
     pub unfold_all: &'static str,
     pub fold_all: &'static str,
     pub no_headings: &'static str,
+    /// "missing files" — the unresolved-dep count in the outline.
+    pub missing_files: &'static str,
+    /// "label" — the kind shown under `\ref{}` completion items.
+    pub label_item: &'static str,
     // status bar
     pub tex_badge: &'static str,
     pub issues_none: &'static str,
@@ -212,6 +216,8 @@ const EN: Strings = Strings {
     unfold_all: "unfold",
     fold_all: "fold",
     no_headings: "(no headings)",
+    missing_files: "missing files",
+    label_item: "label",
     tex_badge: "TeX",
     issues_none: "no issues",
     issues_many: "⚠ {n} issues",
@@ -319,6 +325,8 @@ const AR: Strings = Strings {
     unfold_all: "توسيع",
     fold_all: "طي",
     no_headings: "(لا عناوين)",
+    missing_files: "ملفات مفقودة",
+    label_item: "وسم",
     tex_badge: "TeX",
     issues_none: "لا مشكلات",
     issues_many: "⚠ {n} مشكلات",
