@@ -177,12 +177,15 @@ pub struct Strings {
 }
 
 /// Substitute `{name}`-style placeholders in a catalog format string.
+/// Substitute `{name}` placeholders and run the result through
+/// [`view`] — callers display the string directly; without the view
+/// pass Arabic renders logical-order unshaped (scrambled).
 pub fn fmt(fmt: &'static str, pairs: &[(&str, &str)]) -> String {
     let mut out = fmt.to_string();
     for (k, v) in pairs {
         out = out.replace(&format!("{{{k}}}"), v);
     }
-    out
+    view(&out).into_owned()
 }
 
 const EN: Strings = Strings {
@@ -489,5 +492,13 @@ mod tests {
     fn arabic_rtl_and_english_ltr() {
         assert!(Lang::Ar.rtl());
         assert!(!Lang::En.rtl());
+    }
+
+    #[test]
+    fn fmt_shapes_arabic_output() {
+        let out = fmt("سطر {l}، عمود {c}", &[("l", "5"), ("c", "12")]);
+        // Visual-order output differs from the logical template.
+        assert_ne!(out, "سطر 5، عمود 12");
+        assert!(out.contains('5') && out.contains("12"));
     }
 }

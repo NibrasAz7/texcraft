@@ -161,7 +161,7 @@ impl CiteDialog {
                         ui.label(egui::RichText::new(format!("{f}: {n} issue(s)")).size(9.5).color(pal.muted));
                     }
                 });
-                let edit = ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(s.cite_filter_hint).desired_width(400.0));
+                let edit = ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text(lang::view(s.cite_filter_hint)).desired_width(400.0));
                 ui.memory_mut(|m| m.request_focus(edit.id));
                 if edit.changed() {
                     self.sel = 0;

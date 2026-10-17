@@ -1419,11 +1419,11 @@ impl WarraqApp {
         });
     }
 
-    /// Left sidebar: file toolbar, project tree, FILE OUTLINE. In an RTL
-    /// UI the whole dock mirrors: files on the right, preview left.
+    /// Left sidebar: file toolbar, project tree, FILE OUTLINE. Panels do
+    /// not mirror in RTL UI — only the text direction does.
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
-        let panel = if self.lang().rtl() { egui::Panel::right("sidebar") } else { egui::Panel::left("sidebar") };
+        let panel = egui::Panel::left("sidebar");
         panel
             .resizable(true)
             .default_size(230.0)
@@ -1980,11 +1980,11 @@ impl WarraqApp {
         );
     }
 
-    /// Right pane: page navigation toolbar + single-page canvas. Mirrors
-    /// to the left in RTL UI languages (the sidebar takes the right).
+    /// Right pane: page navigation toolbar + page canvas. Panel sides are
+    /// fixed in both text directions — only text mirrors in RTL.
     fn preview_pane(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
-        let panel = if self.lang().rtl() { egui::Panel::left("preview") } else { egui::Panel::right("preview") };
+        let panel = egui::Panel::right("preview");
         panel.resizable(true).default_size(460.0).size_range(240.0..=900.0).frame(egui::Frame::new().fill(theme::pal().canvas_bg)).show(ui, |ui| {
             // Toolbar: ‹ n/m ›  ·  - zoom% +  fit ▾
             egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
@@ -2425,7 +2425,7 @@ impl WarraqApp {
                         ui.label(egui::RichText::new(lang::view(desc)).size(9.5).color(theme::pal().muted));
                     }
                 });
-                ui.add(egui::TextEdit::singleline(&mut self.tpl_name).hint_text(s.file_name_hint).desired_width(240.0));
+                ui.add(egui::TextEdit::singleline(&mut self.tpl_name).hint_text(lang::view(s.file_name_hint)).desired_width(240.0));
                 ui.horizontal(|ui| {
                     create = ui.add_enabled(sel.is_some() && !self.tpl_name.trim().is_empty(), egui::Button::new(lang::view(s.create))).clicked();
                     close = ui.button(lang::view(s.cancel)).clicked();
@@ -2491,7 +2491,7 @@ impl WarraqApp {
             .show(ctx, |ui| {
                 let s = self.s();
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.hist_label).hint_text(s.hist_label_hint).desired_width(180.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.hist_label).hint_text(lang::view(s.hist_label_hint)).desired_width(180.0));
                     snap = ui.button(lang::view(s.snapshot_now)).clicked();
                 });
                 ui.separator();
@@ -2654,7 +2654,7 @@ impl WarraqApp {
                     ui.add(egui::TextEdit::singleline(&mut self.ai.model).hint_text("llama3.2, gpt-4o-mini, …").desired_width(300.0));
                     ui.end_row();
                     ui.label(egui::RichText::new(lang::view(s.ai_token)).size(11.0).color(theme::pal().muted));
-                    ui.add(egui::TextEdit::singleline(&mut self.ai.token).password(true).hint_text(s.ai_token_hint).desired_width(300.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.ai.token).password(true).hint_text(lang::view(s.ai_token_hint)).desired_width(300.0));
                     ui.end_row();
                 });
                 ui.horizontal(|ui| {
