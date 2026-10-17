@@ -33,17 +33,33 @@ pub fn is_available() -> bool {
 
 /// Forward search: source position → PDF boxes.
 pub fn forward(pdf: &Path, source: &Path, line: u32, column: u32) -> Result<Vec<PdfLocation>, String> {
-    let input = format!("{line}:{column}:{}", source.display());
-    let out = run(&["view", "-i", &input, "-o", &pdf.to_string_lossy()], pdf)?;
+    let input = format!("{line}:{column}:{}", arg_path(source, pdf).display());
+    let out = run(&["view", "-i", &input, "-o", &arg_path(pdf, pdf).to_string_lossy()], pdf)?;
     Ok(parse_view(&out))
 }
 
 /// Inverse search: point on a PDF page (PDF points, top-left origin) →
 /// source position.
 pub fn inverse(pdf: &Path, page: u32, x: f64, y: f64) -> Result<Option<SourceLocation>, String> {
-    let output = format!("{page}:{x:.2}:{y:.2}:{}", pdf.display());
+    let output = format!("{page}:{x:.2}:{y:.2}:{}", arg_path(pdf, pdf).display());
     let out = run(&["edit", "-o", &output], pdf)?;
     Ok(parse_edit(&out))
+}
+
+/// Path as handed to the synctex CLI — relative to `run`'s working
+/// directory (the PDF's folder) when possible. An absolute Windows path
+/// like `C:\…\a.pdf` carries a drive colon that collides with the
+/// `page:x:y:file` / `line:col:file` format, so `a.pdf` it is.
+fn arg_path(path: &Path, pdf: &Path) -> PathBuf {
+    let dir = pdf.parent().unwrap_or_else(|| Path::new("."));
+    if let Ok(d) = dir.canonicalize() {
+        if let Ok(p) = path.canonicalize() {
+            if let Ok(rel) = p.strip_prefix(&d) {
+                return rel.to_path_buf();
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 fn run(args: &[&str], pdf: &Path) -> Result<String, String> {
@@ -51,7 +67,11 @@ fn run(args: &[&str], pdf: &Path) -> Result<String, String> {
     let output =
         Command::new("synctex").args(args).current_dir(workdir).stdin(Stdio::null()).output().map_err(|e| format!("failed to run synctex: {e}"))?;
     if !output.status.success() {
-        return Err(format!("synctex failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+        // Errors like a usage dump are long; the status bar only needs
+        // the first meaningful line.
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.lines().find(|l| !l.trim().is_empty()).unwrap_or("unknown error").trim().chars().take(160).collect::<String>();
+        return Err(format!("synctex failed: {detail}"));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
