@@ -35,8 +35,8 @@
 //! runs (the GUI's own compile uses a worker; unifying that is future
 //! work).
 
-use std::io::{self, BufRead, BufReader, ErrorKind, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
@@ -197,6 +197,7 @@ fn conn(stream: TcpStream, tx: SyncSender<CtrlRequest>, token: Arc<str>, ctx: Ar
             Ok(LineRead::End) | Err(_) => break,
             Ok(LineRead::TooLong) => {
                 let _ = reply(&mut write, &err(Value::Null, "request too large"));
+                graceful_close(&mut write, &mut reader);
                 break;
             }
         }
@@ -208,6 +209,23 @@ fn conn(stream: TcpStream, tx: SyncSender<CtrlRequest>, token: Arc<str>, ctx: Ar
         let Some(resp) = handle(line, &tx, &token, &ctx) else { break };
         if reply(&mut write, &resp).is_err() {
             break;
+        }
+    }
+}
+
+/// Close a connection we answered on, without RST-ing the reply away:
+/// FIN our write side, then drain whatever the peer still had in
+/// flight (bounded) — a plain drop with unread peer data turns into a
+/// reset that can eat the reply we just wrote.
+fn graceful_close(write: &mut TcpStream, reader: &mut BufReader<TcpStream>) {
+    let _ = write.shutdown(Shutdown::Write);
+    let _ = reader.get_ref().set_read_timeout(Some(std::time::Duration::from_millis(200)));
+    let mut sink = [0u8; 8192];
+    let mut drained = 0usize;
+    while drained < MAX_LINE {
+        match reader.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => drained += k,
         }
     }
 }

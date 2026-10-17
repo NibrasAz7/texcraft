@@ -82,6 +82,49 @@ impl Zoom {
     }
 }
 
+/// How the preview lays out pages: a continuous scroll, one page at a
+/// time, two pages per spread, or book layout (cover alone, then
+/// verso/recto pairs).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PageMode {
+    Scroll,
+    Single,
+    TwoUp,
+    TwoUpCover,
+}
+
+impl PageMode {
+    /// All modes, in menu order.
+    const ALL: [PageMode; 4] = [PageMode::Scroll, PageMode::Single, PageMode::TwoUp, PageMode::TwoUpCover];
+
+    fn label(self) -> &'static str {
+        match self {
+            PageMode::Scroll => "continuous",
+            PageMode::Single => "single page",
+            PageMode::TwoUp => "two pages",
+            PageMode::TwoUpCover => "two pages + cover",
+        }
+    }
+
+    fn pref(self) -> &'static str {
+        match self {
+            PageMode::Scroll => "scroll",
+            PageMode::Single => "single",
+            PageMode::TwoUp => "two-up",
+            PageMode::TwoUpCover => "two-up-cover",
+        }
+    }
+
+    fn from_pref(s: &str) -> PageMode {
+        match s {
+            "single" => PageMode::Single,
+            "two-up" => PageMode::TwoUp,
+            "two-up-cover" => PageMode::TwoUpCover,
+            _ => PageMode::Scroll,
+        }
+    }
+}
+
 /// Persisted preferences (craft-settings `config.toml`): theme, preview
 /// zoom, panel visibility, engine choice (by name — the discovered list
 /// order isn't stable), and the auto-compile toggle.
@@ -96,6 +139,8 @@ struct TexPrefs {
     logs: bool,
     /// Spell underlines (dictionary must exist under `dicts/`).
     spellcheck: bool,
+    /// Preview page layout (see [`PageMode::pref`]).
+    page_mode: String,
     /// BYO AI endpoint + model. The token is deliberately NOT persisted
     /// — it stays in-memory for the session.
     ai_endpoint: String,
@@ -112,6 +157,7 @@ impl Default for TexPrefs {
             outline: true,
             logs: false,
             spellcheck: true,
+            page_mode: "scroll".into(),
             ai_endpoint: String::new(),
             ai_model: String::new(),
         }
@@ -224,6 +270,14 @@ pub struct TexApp {
     pdf_path: Option<PathBuf>,
     page_idx: usize,
     zoom: Zoom,
+    /// Page layout mode for the preview canvas.
+    page_mode: PageMode,
+    /// Painted rects of the pages drawn last frame, in page order —
+    /// lets ‹ › scroll to a page in continuous mode.
+    page_rects: Vec<egui::Rect>,
+    /// Page rect the next paint should scroll into view (‹ › jump in
+    /// continuous mode).
+    pending_page_scroll: Option<egui::Rect>,
     flash: Option<Flash>,
 
     // Sidebar + editor chrome
@@ -311,6 +365,8 @@ pub struct TexApp {
     ai: ai::AiPanel,
     /// Document-statistics window.
     stats_open: bool,
+    /// Keyboard-shortcuts help window.
+    shortcuts_open: bool,
     /// Cached worker-compiled previews for the math under the caret.
     mathprev: mathprev::MathPreview,
     /// Print job result channel (submitted on a worker — `submit`
@@ -341,6 +397,9 @@ impl TexApp {
             pdf_path: None,
             page_idx: 0,
             zoom: Zoom::FitWidth,
+            page_mode: PageMode::Scroll,
+            page_rects: Vec::new(),
+            pending_page_scroll: None,
             flash: None,
             tree: Vec::new(),
             tree_scanned_at: f64::NEG_INFINITY,
@@ -387,6 +446,7 @@ impl TexApp {
             prev_src: String::new(),
             ai: ai::AiPanel::new(),
             stats_open: false,
+            shortcuts_open: false,
             mathprev: mathprev::MathPreview::new(),
             #[cfg(not(target_arch = "wasm32"))]
             print_rx: None,
@@ -399,6 +459,7 @@ impl TexApp {
         app.zoom = Zoom::from_pref(&p.zoom);
         app.outline_open = p.outline;
         app.show_logs = p.logs;
+        app.page_mode = PageMode::from_pref(&p.page_mode);
         app.spell.set_enabled(p.spellcheck);
         if !p.ai_endpoint.is_empty() {
             app.ai.endpoint = p.ai_endpoint;
@@ -1173,6 +1234,9 @@ impl TexApp {
                     if cite::cite_button(ui).clicked() {
                         self.open_cite(ui.ctx());
                     }
+                    if ui.selectable_label(false, "?").on_hover_text("keyboard shortcuts (F1)").clicked() {
+                        self.shortcuts_open = !self.shortcuts_open;
+                    }
                     ui.separator();
                     if theme_toggle(ui).clicked() {
                         theme::apply(ui.ctx(), !theme::is_dark());
@@ -1700,7 +1764,7 @@ impl TexApp {
                         let n = self.pages.len();
                         let has = n > 0;
                         if ui.add_enabled(has && self.page_idx > 0, egui::Button::new("‹").min_size(egui::vec2(22.0, 18.0))).clicked() {
-                            self.page_idx = self.page_idx.saturating_sub(1);
+                            self.page_step(-1);
                         }
                         ui.label(
                             egui::RichText::new(if has { format!("{} / {}", self.page_idx + 1, n) } else { "– / –".into() })
@@ -1709,16 +1773,21 @@ impl TexApp {
                                 .monospace(),
                         );
                         if ui.add_enabled(has && self.page_idx + 1 < n, egui::Button::new("›").min_size(egui::vec2(22.0, 18.0))).clicked() {
-                            self.page_idx += 1;
+                            self.page_step(1);
                         }
+                        egui::ComboBox::from_id_salt("page-mode").selected_text(self.page_mode.label()).show_ui(ui, |ui| {
+                            for m in PageMode::ALL {
+                                ui.selectable_value(&mut self.page_mode, m, m.label());
+                            }
+                        });
                         ui.separator();
                         if ui.small_button("−").clicked() {
-                            self.zoom = Zoom::Pct(self.zoom_pct(ui) * 0.9);
+                            self.zoom = Zoom::Pct((self.zoom_pct(ui) * 0.9).clamp(0.25, 4.0));
                         }
                         let pct = self.zoom_label(ui);
                         ui.label(egui::RichText::new(pct).size(11.0).color(theme::pal().muted).monospace());
                         if ui.small_button("+").clicked() {
-                            self.zoom = Zoom::Pct(self.zoom_pct(ui) * 1.1);
+                            self.zoom = Zoom::Pct((self.zoom_pct(ui) * 1.1).clamp(0.25, 4.0));
                         }
                         egui::ComboBox::from_id_salt("fit")
                             .selected_text(match self.zoom {
@@ -1729,6 +1798,11 @@ impl TexApp {
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut self.zoom, Zoom::FitWidth, "fit width");
                                 ui.selectable_value(&mut self.zoom, Zoom::FitPage, "fit page");
+                                ui.separator();
+                                // Percent presets snap the custom zoom.
+                                for &p in ZOOM_PRESETS {
+                                    ui.selectable_value(&mut self.zoom, Zoom::Pct(p), format!("{:.0}%", p * 100.0));
+                                }
                             });
                         #[cfg(not(target_arch = "wasm32"))]
                         if ui
@@ -1742,11 +1816,12 @@ impl TexApp {
                 });
                 ui.separator();
 
-                // Canvas: dark backdrop, one page centered with a shadow.
+                // Canvas: dark backdrop; layout depends on self.page_mode.
                 egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                     let area = ui.available_rect_before_wrap();
                     ui.painter().rect_filled(area, 0.0, theme::pal().canvas_bg);
-                    let Some(tex) = self.pages.get(self.page_idx) else {
+                    let n = self.pages.len();
+                    if n == 0 {
                         ui.allocate_rect(area, egui::Sense::hover());
                         ui.painter().text(
                             area.center(),
@@ -1756,60 +1831,171 @@ impl TexApp {
                             theme::pal().faint,
                         );
                         return;
-                    };
-                    let tsize = tex.size_vec2();
+                    }
+                    // Ctrl+wheel / pinch zoom (egui's zoom_delta handles
+                    // the modifier check) — only over the canvas.
+                    let zd = ui.ctx().input(|i| i.zoom_delta());
+                    if (zd - 1.0).abs() > f32::EPSILON && ui.ui_contains_pointer() {
+                        self.zoom = Zoom::Pct((self.zoom_pct(ui) * zd).clamp(0.25, 4.0));
+                    }
+                    const GAP: f32 = 16.0;
+                    // Zoom baseline: in spread modes a spread is two pages
+                    // plus a gap wide. Pages may differ in size — the
+                    // fit math uses the widest/tallest page.
+                    let mut unit_w = 1.0f32;
+                    let mut unit_h = 1.0f32;
+                    for t in &self.pages {
+                        let s = t.size_vec2();
+                        unit_w = unit_w.max(s.x);
+                        unit_h = unit_h.max(s.y);
+                    }
+                    if matches!(self.page_mode, PageMode::TwoUp | PageMode::TwoUpCover) {
+                        unit_w = unit_w * 2.0 + GAP;
+                    }
                     let zoom = match self.zoom {
                         Zoom::Pct(p) => p,
-                        Zoom::FitWidth => (area.width() - 32.0).max(40.0) / tsize.x,
-                        Zoom::FitPage => ((area.width() - 32.0) / tsize.x).min((area.height() - 32.0) / tsize.y).max(0.01),
+                        Zoom::FitWidth => (area.width() - 32.0).max(40.0) / unit_w,
+                        Zoom::FitPage => ((area.width() - 32.0) / unit_w).min((area.height() - 32.0) / unit_h).max(0.01),
                     };
-                    let size = tsize * zoom;
-                    let needed = egui::vec2(size.x + 48.0, size.y + 48.0);
-                    let (rect, page_resp) =
-                        ui.allocate_exact_size(egui::vec2(needed.x.max(area.width()), needed.y.max(area.height())), egui::Sense::hover());
-                    let page = egui::Rect::from_center_size(rect.center(), size);
-                    let painter = ui.painter();
-                    painter.rect_filled(page.translate(egui::vec2(2.0, 4.0)), 2.0, egui::Color32::from_black_alpha(120));
-                    painter.image(tex.id(), page, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0, 1.0)), egui::Color32::WHITE);
-                    painter.rect_stroke(page, 0.0, egui::Stroke::new(1.0, theme::pal().border), egui::StrokeKind::Outside);
-
-                    // SyncTeX flash: highlight the forward-search box, fade
-                    // out over FLASH_SECS, and scroll it into view once.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(f) = &self.flash {
-                        if f.page == self.page_idx {
-                            let age = ui.ctx().input(|i| i.time) - f.at;
-                            let pt = self.page_pts.get(self.page_idx).copied().unwrap_or(tsize);
-                            let scale = egui::vec2(page.width() / pt.x.max(1.0), page.height() / pt.y.max(1.0));
-                            let r = egui::Rect::from_min_size(
-                                page.min + egui::vec2(f.rect_pt.min.x * scale.x, f.rect_pt.min.y * scale.y),
-                                egui::vec2(f.rect_pt.width() * scale.x, f.rect_pt.height() * scale.y),
-                            );
-                            if age < FLASH_SECS {
-                                let a = (1.0 - (age / FLASH_SECS) as f32).clamp(0.0, 1.0);
-                                painter.rect_filled(r, 2.0, theme::pal().accent.gamma_multiply(0.25 * a));
-                                painter.rect_stroke(r, 2.0, egui::Stroke::new(1.5, theme::pal().accent.gamma_multiply(a)), egui::StrokeKind::Inside);
-                                ui.ctx().request_repaint();
-                            }
-                            if age < 0.3 {
-                                ui.scroll_to_rect(r.expand(90.0), Some(egui::Align::Center));
-                            }
+                    self.page_rects.clear();
+                    match self.page_mode {
+                        PageMode::Scroll => self.preview_scroll(ui, area, zoom, GAP),
+                        _ => {
+                            let s = spread_first(self.page_mode, spread_of_page(self.page_mode, self.page_idx));
+                            self.preview_spread(ui, area, zoom, GAP, &spread_pages(self.page_mode, s, n));
                         }
-                    }
-
-                    // SyncTeX inverse: click on the page jumps the caret.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        let hit = ui.interact(page, ui.id().with("pdf-hit"), egui::Sense::click());
-                        if hit.clicked() {
-                            if let Some(pos) = hit.interact_pointer_pos() {
-                                self.inverse_sync(page, pos);
-                            }
-                        }
-                        let _ = page_resp;
                     }
                 });
             });
+    }
+
+    /// Continuous-scroll layout: every page centered in one column.
+    /// Paints all pages and records their rects for ‹ › scrolling.
+    fn preview_scroll(&mut self, ui: &mut egui::Ui, area: egui::Rect, zoom: f32, gap: f32) {
+        let n = self.pages.len();
+        let mut total_h = gap;
+        let mut max_w = 0.0f32;
+        for t in &self.pages {
+            let s = t.size_vec2() * zoom;
+            total_h += s.y + gap;
+            max_w = max_w.max(s.x);
+        }
+        let needed = egui::vec2((max_w + 32.0).max(area.width()), total_h.max(area.height()));
+        let (region, _) = ui.allocate_exact_size(needed, egui::Sense::hover());
+        let mut y = region.top() + gap;
+        if let Some(r) = self.pending_page_scroll.take() {
+            ui.scroll_to_rect(r.expand(gap), Some(egui::Align::Center));
+        }
+        for i in 0..n {
+            let Some(tex) = self.pages.get(i).cloned() else { continue };
+            let size = tex.size_vec2() * zoom;
+            let page = egui::Rect::from_min_size(egui::pos2(region.center().x - size.x / 2.0, y), size);
+            self.page_rects.push(page);
+            self.paint_page(ui, i, page, &tex);
+            y += size.y + gap;
+        }
+        // Track which page is nearest the view center for the counter.
+        let mid = area.center().y;
+        if let Some((i, _)) = self
+            .page_rects
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| (a.center().y - mid).abs().partial_cmp(&(b.center().y - mid).abs()).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            self.page_idx = i;
+        }
+    }
+
+    /// Single-page or spread layout: `idx` are the visible pages (1 or
+    /// 2) laid out in a row, centered in the view.
+    fn preview_spread(&mut self, ui: &mut egui::Ui, area: egui::Rect, zoom: f32, gap: f32, idx: &[usize]) {
+        let mut row_w = gap * idx.len().saturating_sub(1) as f32;
+        let mut max_h = 0.0f32;
+        for &i in idx {
+            if let Some(t) = self.pages.get(i) {
+                let s = t.size_vec2() * zoom;
+                row_w += s.x;
+                max_h = max_h.max(s.y);
+            }
+        }
+        let needed = egui::vec2((row_w + 48.0).max(area.width()), (max_h + 48.0).max(area.height()));
+        let (region, _) = ui.allocate_exact_size(needed, egui::Sense::hover());
+        let mut x = region.center().x - row_w / 2.0;
+        let cy = region.center().y;
+        for &i in idx {
+            let Some(tex) = self.pages.get(i).cloned() else { continue };
+            let size = tex.size_vec2() * zoom;
+            let page = egui::Rect::from_min_size(egui::pos2(x, cy - size.y / 2.0), size);
+            if self.page_rects.len() <= i {
+                self.page_rects.resize(i + 1, egui::Rect::NOTHING);
+            }
+            if let Some(slot) = self.page_rects.get_mut(i) {
+                *slot = page;
+            }
+            self.paint_page(ui, i, page, &tex);
+            x += size.x + gap;
+        }
+    }
+
+    /// Paint one page at `page`: shadow, image, border, SyncTeX flash
+    /// overlay (if this page is flashed) and the inverse-search click.
+    fn paint_page(&mut self, ui: &mut egui::Ui, idx: usize, page: egui::Rect, tex: &egui::TextureHandle) {
+        let painter = ui.painter();
+        painter.rect_filled(page.translate(egui::vec2(2.0, 4.0)), 2.0, egui::Color32::from_black_alpha(120));
+        painter.image(tex.id(), page, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1.0, 1.0)), egui::Color32::WHITE);
+        painter.rect_stroke(page, 0.0, egui::Stroke::new(1.0, theme::pal().border), egui::StrokeKind::Outside);
+
+        // SyncTeX flash: highlight the forward-search box, fade out over
+        // FLASH_SECS, and scroll it into view once.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(f) = &self.flash {
+            if f.page == idx {
+                let age = ui.ctx().input(|i| i.time) - f.at;
+                let pt = self.page_pts.get(idx).copied().unwrap_or(tex.size_vec2());
+                let scale = egui::vec2(page.width() / pt.x.max(1.0), page.height() / pt.y.max(1.0));
+                let r = egui::Rect::from_min_size(
+                    page.min + egui::vec2(f.rect_pt.min.x * scale.x, f.rect_pt.min.y * scale.y),
+                    egui::vec2(f.rect_pt.width() * scale.x, f.rect_pt.height() * scale.y),
+                );
+                if age < FLASH_SECS {
+                    let a = (1.0 - (age / FLASH_SECS) as f32).clamp(0.0, 1.0);
+                    painter.rect_filled(r, 2.0, theme::pal().accent.gamma_multiply(0.25 * a));
+                    painter.rect_stroke(r, 2.0, egui::Stroke::new(1.5, theme::pal().accent.gamma_multiply(a)), egui::StrokeKind::Inside);
+                    ui.ctx().request_repaint();
+                }
+                if age < 0.3 {
+                    ui.scroll_to_rect(r.expand(90.0), Some(egui::Align::Center));
+                }
+            }
+        }
+
+        // SyncTeX inverse: click on the page jumps the caret.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let hit = ui.interact(page, ui.id().with(("pdf-hit", idx)), egui::Sense::click());
+            if hit.clicked() {
+                if let Some(pos) = hit.interact_pointer_pos() {
+                    self.inverse_sync(page, pos);
+                }
+            }
+        }
+    }
+
+    /// ‹ › navigation: a step in pages or spreads, depending on the
+    /// layout mode. Continuous mode also marks the target rect for
+    /// scroll-into-view on the next paint.
+    fn page_step(&mut self, dir: i64) {
+        let n = self.pages.len();
+        if n == 0 {
+            return;
+        }
+        let spread = spread_of_page(self.page_mode, self.page_idx);
+        let s = (spread as i64 + dir).clamp(0, spread_count(self.page_mode, n) as i64 - 1) as usize;
+        let next = spread_first(self.page_mode, s).min(n - 1);
+        if self.page_mode == PageMode::Scroll {
+            self.pending_page_scroll = self.page_rects.get(next).copied();
+        }
+        self.page_idx = next;
     }
 
     fn zoom_pct(&self, ui: &egui::Ui) -> f32 {
@@ -2158,6 +2344,34 @@ impl TexApp {
             });
     }
 
+    /// Window: every key binding the app handles, grouped. Opened by
+    /// the `?` toolbar button or F1.
+    fn shortcuts_modal(&mut self, ctx: &egui::Context) {
+        if !self.shortcuts_open {
+            return;
+        }
+        egui::Window::new("Keyboard shortcuts")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .open(&mut self.shortcuts_open)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for (group, rows) in SHORTCUTS {
+                        ui.label(egui::RichText::new(*group).size(10.0).color(theme::pal().faint));
+                        egui::Grid::new(("keys", group)).num_columns(2).spacing([24.0, 3.0]).show(ui, |ui| {
+                            for (keys, action) in *rows {
+                                ui.label(egui::RichText::new(*keys).size(11.5).monospace().color(theme::pal().accent_dim));
+                                ui.label(egui::RichText::new(*action).size(11.5));
+                                ui.end_row();
+                            }
+                        });
+                        ui.add_space(8.0);
+                    }
+                });
+            });
+    }
+
     /// Window: BYO-provider AI assist — endpoint/model fields, test +
     /// ask buttons, response area. Token stays session-only (never
     /// persisted). Worker replies drain through `AiPanel::poll`.
@@ -2364,6 +2578,99 @@ fn replicate_mirror_edit(prev: &str, cur: &str, m: &mirrors::Mirrors) -> Option<
 
 /// Char index of (1-based `line`, 1-based char `col`) in `src` — the
 /// inverse of `track_cursor`'s index→Ln/Col walk.
+/// Zoom presets in the toolbar combo, ascending — same ladder PDF
+/// viewers use.
+const ZOOM_PRESETS: &[f32] = &[0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+
+/// Key bindings the shortcuts window lists — (group, [(keys, action)]).
+/// Keep in sync with `editor_shortcuts`, `ui`'s global keys, and the
+/// editor gestures (completion, SyncTeX click).
+const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
+    ("file", &[("Ctrl+S", "save"), ("🖨 (toolbar)", "print the PDF"), ("F12", "save a window screenshot")]),
+    (
+        "editing",
+        &[
+            ("Ctrl+Z / Ctrl+Shift+Z", "undo / redo"),
+            ("Ctrl+D", "duplicate line"),
+            ("Alt+↑ / Alt+↓", "move line up / down"),
+            ("Ctrl+/", "comment / uncomment selection"),
+            ("Ctrl+Shift+K", "delete line"),
+            ("Ctrl+Shift+Backspace", "delete to end of line"),
+            ("\\…", "command completion — Enter/Tab accepts, Esc closes"),
+            ("\\begin{ / \\end{", "environment completion"),
+            ("Ctrl+M (with selection)", "mirror all occurrences — type once, edit all"),
+            ("Esc", "clear mirrors"),
+        ],
+    ),
+    (
+        "navigation",
+        &[
+            ("Ctrl+click in source", "jump to that spot in the PDF"),
+            ("click in PDF", "jump back to the source line"),
+            ("Ctrl+Shift+C", "insert a citation"),
+            ("‹ › (toolbar)", "previous / next page or spread"),
+            ("Ctrl+scroll over PDF", "zoom in / out"),
+        ],
+    ),
+    ("help", &[("F1", "this window")]),
+];
+
+/// How many spreads `n` pages make in `mode`. Single/continuous treat
+/// each page as its own spread; TwoUp pairs [0,1],[2,3],…; TwoUpCover
+/// keeps page 0 solo then pairs [1,2],[3,4],….
+fn spread_count(mode: PageMode, n: usize) -> usize {
+    match mode {
+        PageMode::Scroll | PageMode::Single => n,
+        PageMode::TwoUp => n.div_ceil(2),
+        PageMode::TwoUpCover => 1 + n / 2,
+    }
+}
+
+/// Which spread `page` belongs to in `mode`.
+fn spread_of_page(mode: PageMode, page: usize) -> usize {
+    match mode {
+        PageMode::Scroll | PageMode::Single => page,
+        PageMode::TwoUp => page / 2,
+        PageMode::TwoUpCover => {
+            if page == 0 {
+                0
+            } else {
+                page.div_ceil(2)
+            }
+        }
+    }
+}
+
+/// First page of spread `s` in `mode`.
+fn spread_first(mode: PageMode, s: usize) -> usize {
+    match mode {
+        PageMode::Scroll | PageMode::Single => s,
+        PageMode::TwoUp => s * 2,
+        PageMode::TwoUpCover => {
+            if s == 0 {
+                0
+            } else {
+                2 * s - 1
+            }
+        }
+    }
+}
+
+/// Pages in the spread starting at `first`, clamped to `n` — `[first]`
+/// or `[first, first+1]` (empty if `first` is out of range). Single/
+/// continuous spreads and the cover page are always solo.
+fn spread_pages(mode: PageMode, first: usize, n: usize) -> Vec<usize> {
+    if first >= n {
+        return Vec::new();
+    }
+    let solo = matches!(mode, PageMode::Scroll | PageMode::Single) || (mode == PageMode::TwoUpCover && first == 0);
+    if !solo && first + 1 < n {
+        vec![first, first + 1]
+    } else {
+        vec![first]
+    }
+}
+
 fn char_index_of_lc(src: &str, line: usize, col: usize) -> usize {
     let mut idx = 0usize;
     for (i, l) in src.split('\n').enumerate() {
@@ -2547,6 +2854,63 @@ mod tests {
             }
         }
     }
+
+    /// Spread mapping invariants: every page is covered by exactly one
+    /// spread, spreads tile the document in order, and round-tripping
+    /// `spread_of_page` → `spread_first` stays inside the spread.
+    #[test]
+    fn spreads_cover_document() {
+        for mode in [PageMode::TwoUp, PageMode::TwoUpCover] {
+            for n in 0..=9usize {
+                let count = spread_count(mode, n);
+                let mut covered = Vec::new();
+                for s in 0..count {
+                    let first = spread_first(mode, s);
+                    assert!(first < n || n == 0, "{mode:?} spread {s} of {n} starts past the end");
+                    for p in spread_pages(mode, first, n) {
+                        assert_eq!(spread_of_page(mode, p), s, "{mode:?} page {p} not in spread {s} (n={n})");
+                        covered.push(p);
+                    }
+                }
+                assert_eq!(covered, (0..n).collect::<Vec<_>>(), "{mode:?} spreads do not tile {n} pages");
+            }
+        }
+    }
+
+    /// TwoUpCover is book layout: page 0 alone, then verso/recto pairs.
+    #[test]
+    fn cover_spreads_are_book_layout() {
+        let m = PageMode::TwoUpCover;
+        assert_eq!(spread_count(m, 5), 3);
+        assert_eq!(spread_pages(m, spread_first(m, 0), 5), vec![0]);
+        assert_eq!(spread_pages(m, spread_first(m, 1), 5), vec![1, 2]);
+        assert_eq!(spread_pages(m, spread_first(m, 2), 5), vec![3, 4]);
+        assert_eq!(spread_of_page(m, 4), 2);
+        // Even page count leaves a solo last page, still reachable.
+        assert_eq!(spread_pages(m, spread_first(m, 2), 4), vec![3]);
+    }
+
+    /// TwoUp is plain pairs; Single/continuous are identity spreads.
+    #[test]
+    fn two_up_and_single_spreads() {
+        assert_eq!(spread_count(PageMode::TwoUp, 5), 3);
+        assert_eq!(spread_pages(PageMode::TwoUp, spread_first(PageMode::TwoUp, 2), 5), vec![4]);
+        assert_eq!(spread_of_page(PageMode::TwoUp, 3), 1);
+        for p in 0..4 {
+            assert_eq!(spread_of_page(PageMode::Single, p), p);
+            assert_eq!(spread_first(PageMode::Scroll, p), p);
+        }
+        assert_eq!(spread_count(PageMode::Scroll, 0), 0);
+    }
+
+    /// The mode round-trips through the persisted prefs string.
+    #[test]
+    fn page_mode_pref_roundtrip() {
+        for m in PageMode::ALL {
+            assert_eq!(PageMode::from_pref(m.pref()), m);
+        }
+        assert_eq!(PageMode::from_pref("nonsense"), PageMode::Scroll);
+    }
 }
 
 impl eframe::App for TexApp {
@@ -2576,8 +2940,8 @@ impl eframe::App for TexApp {
         // Mirror UI state into prefs each frame — `update` no-ops when
         // nothing changed; `tick` writes the file after its debounce.
         let engine = self.engine_sel.and_then(|i| self.engines.get(i).cloned()).unwrap_or_default();
-        let (dark, auto, zoom, outline, logs, spell) =
-            (theme::is_dark(), self.autocompile, self.zoom.pref(), self.outline_open, self.show_logs, self.spell.enabled());
+        let (dark, auto, zoom, outline, logs, spell, pm) =
+            (theme::is_dark(), self.autocompile, self.zoom.pref(), self.outline_open, self.show_logs, self.spell.enabled(), self.page_mode.pref());
         let (ai_ep, ai_model) = (self.ai.endpoint.clone(), self.ai.model.clone());
         self.settings.update(|p| {
             p.dark = dark;
@@ -2587,6 +2951,7 @@ impl eframe::App for TexApp {
             p.outline = outline;
             p.logs = logs;
             p.spellcheck = spell;
+            p.page_mode = pm.into();
             p.ai_endpoint = ai_ep.clone();
             p.ai_model = ai_model.clone();
         });
@@ -2605,6 +2970,9 @@ impl eframe::App for TexApp {
         if ctx.input(|i| i.key_pressed(egui::Key::C) && i.modifiers.ctrl && i.modifiers.shift) && !self.cite.is_open() {
             self.open_cite(&ctx);
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.shortcuts_open = !self.shortcuts_open;
+        }
         self.editor_shortcuts(&ctx);
         handle_screenshot(&ctx);
 
@@ -2616,6 +2984,7 @@ impl eframe::App for TexApp {
         self.editor_pane(ui);
         self.new_entry_modal(&ctx);
         self.stats_modal(&ctx);
+        self.shortcuts_modal(&ctx);
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.tpl_modal(&ctx);
