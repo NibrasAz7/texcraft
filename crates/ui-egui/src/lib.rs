@@ -18,6 +18,7 @@ mod edits;
 mod files;
 mod fold;
 mod highlight;
+mod icons;
 mod mathprev;
 mod mirrors;
 mod spellcheck;
@@ -1149,8 +1150,9 @@ impl TexApp {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("topbar").frame(egui::Frame::new().fill(theme::pal().top_bg).inner_margin(egui::Margin::symmetric(12, 7))).show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Leaf-ish mark + project name + path.
-                ui.label(egui::RichText::new("❖").size(16.0).color(theme::pal().accent));
+                // Leaf mark + project name + path.
+                let (lr, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                icons::leaf(ui.painter(), lr, theme::pal().accent);
                 let root = self.project_root();
                 let title = self
                     .session
@@ -1160,20 +1162,25 @@ impl TexApp {
                 ui.label(egui::RichText::new(title).strong());
                 ui.label(egui::RichText::new(format!("~/…/{}", root.display())).small().color(theme::pal().muted));
                 let (chip, chip_col) =
-                    if self.session.dirty() { ("●  unsaved changes", theme::pal().warn) } else { ("✓  saved locally", theme::pal().accent_dim) };
+                    if self.session.dirty() { ("unsaved changes", theme::pal().warn) } else { ("saved locally", theme::pal().accent_dim) };
+                {
+                    let (ir, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    if self.session.dirty() {
+                        icons::dot(ui.painter(), ir, chip_col);
+                    } else {
+                        icons::check(ui.painter(), ir, chip_col);
+                    }
+                }
                 ui.label(egui::RichText::new(chip).small().color(chip_col));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Engine pick rides on Recompile's chevron.
-                    let recompile =
-                        egui::Button::new(egui::RichText::new("⟳  Recompile").color(egui::Color32::WHITE).strong()).fill(theme::pal().accent);
                     let enabled = !self.compiling;
-                    if ui.add_enabled(enabled, recompile).clicked() {
+                    if filled_icon_button(ui, 14.0, icons::rebuild, "Recompile", theme::pal().accent, enabled).clicked() {
                         self.start_compile();
                     }
-                    let menu_resp = ui
-                        .add_enabled(enabled, egui::Button::new(egui::RichText::new("⌄").color(egui::Color32::WHITE)).fill(theme::pal().accent_dim))
-                        .on_hover_text("compile options");
+                    let menu_resp =
+                        filled_icon_button(ui, 12.0, icons::chevron_down, "", theme::pal().accent_dim, enabled).on_hover_text("compile options");
                     egui::Popup::from_toggle_button_response(&menu_resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
                         ui.set_min_width(140.0);
                         if ui.selectable_label(self.engine_sel.is_none(), "auto").clicked() {
@@ -1234,7 +1241,7 @@ impl TexApp {
                     if cite::cite_button(ui).clicked() {
                         self.open_cite(ui.ctx());
                     }
-                    if ui.selectable_label(false, "?").on_hover_text("keyboard shortcuts (F1)").clicked() {
+                    if icon_button(ui, 14.0, icons::question, "", true).on_hover_text("keyboard shortcuts (F1)").clicked() {
                         self.shortcuts_open = !self.shortcuts_open;
                     }
                     ui.separator();
@@ -1257,20 +1264,20 @@ impl TexApp {
                 // Icon row: new file / new folder / refresh / open.
                 ui.horizontal(|ui| {
                     let root = self.project_root();
-                    if ui.small_button("📄+").on_hover_text("new file").clicked() {
+                    if icon_button(ui, 14.0, icons::page_new, "", true).on_hover_text("new file").clicked() {
                         self.new_entry = Some(NewEntry { dir: root.clone(), name: String::new(), is_dir: false });
                     }
-                    if ui.small_button("📁+").on_hover_text("new folder").clicked() {
+                    if icon_button(ui, 14.0, icons::folder_new, "", true).on_hover_text("new folder").clicked() {
                         self.new_entry = Some(NewEntry { dir: root.clone(), name: String::new(), is_dir: true });
                     }
-                    if ui.small_button("⟳").on_hover_text("refresh tree").clicked() {
+                    if icon_button(ui, 14.0, icons::rebuild, "", true).on_hover_text("refresh tree").clicked() {
                         self.tree_scanned_at = f64::NEG_INFINITY;
                     }
-                    if ui.small_button("📂").on_hover_text("open file…").clicked() {
+                    if icon_button(ui, 14.0, icons::folder_open, "", true).on_hover_text("open file…").clicked() {
                         self.open_dialog();
                     }
                     #[cfg(not(target_arch = "wasm32"))]
-                    if ui.small_button("📋+").on_hover_text("new from template…").clicked() {
+                    if icon_button(ui, 14.0, icons::page_plus, "", true).on_hover_text("new from template…").clicked() {
                         self.load_templates();
                         self.tpl_sel = None;
                         self.tpl_name.clear();
@@ -1730,7 +1737,7 @@ impl TexApp {
                     }
                     if let Some(h) = self.magic.engine_hint() {
                         ui.separator();
-                        ui.label(egui::RichText::new(format!("⌁ {h}")).size(10.5).color(theme::pal().syn_cmd))
+                        ui.label(egui::RichText::new(format!("engine: {h}")).size(10.5).color(theme::pal().syn_cmd))
                             .on_hover_text("% !TeX program — the file picks its own engine");
                     }
                     if let Some(r) = &self.magic.root {
@@ -1805,8 +1812,7 @@ impl TexApp {
                                 }
                             });
                         #[cfg(not(target_arch = "wasm32"))]
-                        if ui
-                            .add_enabled(self.pdf_path.is_some() && self.print_rx.is_none(), egui::Button::new("🖨").small())
+                        if icon_button(ui, 13.0, icons::printer, "", self.pdf_path.is_some() && self.print_rx.is_none())
                             .on_hover_text("print the PDF")
                             .clicked()
                         {
@@ -2693,6 +2699,78 @@ fn offset_of_line_col(src: &str, line: usize, col: usize) -> usize {
         off = off.saturating_add(l.len()).saturating_add(1);
     }
     src.len()
+}
+
+/// A toolbar button whose glyph is painted, not font-rendered — the
+/// bundled fonts lack most symbol ranges, so Unicode icons show as
+/// squares. `paint` draws inside a `side`×`side` rect left of `label`.
+fn icon_button(ui: &mut egui::Ui, side: f32, paint: fn(&egui::Painter, egui::Rect, egui::Color32), label: &str, enabled: bool) -> egui::Response {
+    let text_w = if label.is_empty() {
+        0.0
+    } else {
+        ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(11.5), theme::pal().text).size().x
+    };
+    let w = side + if label.is_empty() { 10.0 } else { text_w + 14.0 };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, side + 8.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let ink = if !enabled {
+        theme::pal().faint
+    } else if resp.hovered() {
+        theme::pal().text
+    } else {
+        theme::pal().muted
+    };
+    if enabled && resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, theme::pal().hovered);
+    }
+    paint(ui.painter(), egui::Rect::from_center_size(rect.left_center() + egui::vec2(side / 2.0 + 4.0, 0.0), egui::vec2(side, side)), ink);
+    if !label.is_empty() {
+        ui.painter().text(
+            egui::pos2(rect.left() + side + 9.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(11.5),
+            ink,
+        );
+    }
+    resp
+}
+
+/// Icon-only button on a filled pill — the Recompile/dropdown style.
+fn filled_icon_button(
+    ui: &mut egui::Ui,
+    side: f32,
+    paint: fn(&egui::Painter, egui::Rect, egui::Color32),
+    label: &str,
+    fill: egui::Color32,
+    enabled: bool,
+) -> egui::Response {
+    let text_w = if label.is_empty() {
+        0.0
+    } else {
+        ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(11.5), egui::Color32::WHITE).size().x
+    };
+    let w = side + if label.is_empty() { 12.0 } else { text_w + 16.0 };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 22.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let bg = if !enabled {
+        fill.gamma_multiply(0.45)
+    } else if resp.hovered() {
+        fill
+    } else {
+        fill.gamma_multiply(0.85)
+    };
+    ui.painter().rect_filled(rect, 4.0, bg);
+    let ink = egui::Color32::WHITE;
+    paint(ui.painter(), egui::Rect::from_center_size(rect.left_center() + egui::vec2(side / 2.0 + 6.0, 0.0), egui::vec2(side, side)), ink);
+    if !label.is_empty() {
+        ui.painter().text(
+            egui::pos2(rect.left() + side + 10.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            egui::FontId::proportional(11.5),
+            ink,
+        );
+    }
+    resp
 }
 
 /// Painted light/dark toggle — a sun in light mode, a crescent in dark
